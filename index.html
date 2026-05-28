@@ -1,0 +1,163 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>QR Text Transfer</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header>
+    <h1>QR Text Transfer</h1>
+    <p class="subtitle">QRコードでテキストを転送（ブラウザ完結）</p>
+    <nav class="tabs" role="tablist">
+      <button id="tabSend" class="tab is-active" role="tab" aria-selected="true">送信</button>
+      <button id="tabRecv" class="tab" role="tab" aria-selected="false">受信</button>
+      <button id="tabSettings" class="tab" role="tab" aria-selected="false">設定</button>
+    </nav>
+  </header>
+
+  <main>
+    <!-- =========================== Send =========================== -->
+    <section id="paneSend" class="pane is-active" role="tabpanel">
+      <label class="field">
+        <span class="field-label">送信テキスト</span>
+        <textarea id="sendInput" placeholder="ここに送信するテキストを入力" rows="6"></textarea>
+      </label>
+      <div class="row">
+        <button id="btnSendStart" class="btn primary">QR表示開始</button>
+        <button id="btnSendStop" class="btn" disabled>停止</button>
+        <span id="sendStatus" class="status">待機中</span>
+      </div>
+      <div class="qr-wrap">
+        <canvas id="qrCanvas" width="320" height="320"></canvas>
+      </div>
+      <p class="hint">受信側のカメラでこのQRを連続スキャンしてください。1周完了後もループするので途中参加でもOKです。</p>
+    </section>
+
+    <!-- =========================== Receive =========================== -->
+    <section id="paneRecv" class="pane" role="tabpanel" hidden>
+      <div class="row">
+        <button id="btnRecvStart" class="btn primary">カメラ開始</button>
+        <button id="btnRecvStop" class="btn" disabled>停止</button>
+        <button id="btnRecvReset" class="btn">クリア</button>
+      </div>
+      <div class="video-wrap">
+        <video id="cam" playsinline muted autoplay></video>
+        <canvas id="scanCanvas" hidden></canvas>
+      </div>
+      <div class="recv-status">
+        <progress id="recvProgress" value="0" max="1"></progress>
+        <div id="recvStatus" class="status">未開始</div>
+      </div>
+      <div id="recvGrid" class="grid" aria-label="受信済みチャンク"></div>
+      <label class="field">
+        <span class="field-label">復元テキスト</span>
+        <textarea id="recvOutput" rows="6" readonly placeholder="（受信中…）"></textarea>
+      </label>
+      <div class="row">
+        <button id="btnCopy" class="btn" disabled>コピー</button>
+      </div>
+      <p id="httpsWarn" class="warn" hidden>
+        カメラ起動には HTTPS または <code>http://localhost</code> が必要です。
+        現在のURLでは <code>getUserMedia</code> が使えない可能性があります。
+      </p>
+    </section>
+
+    <!-- =========================== Settings =========================== -->
+    <section id="paneSettings" class="pane" role="tabpanel" hidden>
+      <h2>送信側の設定</h2>
+
+      <label class="field">
+        <span class="field-label">1チャンクのサイズ（バイト）<output id="outChunkSize">800</output></span>
+        <input id="cfgChunkSize" type="range" min="100" max="2000" step="50" value="800">
+        <small class="hint">QR1枚に詰めるbase64ペイロード長。小さいほど読みやすいが枚数が増えます。</small>
+      </label>
+
+      <label class="field">
+        <span class="field-label">FPS（1秒あたりの切替枚数）<output id="outFps">5</output></span>
+        <input id="cfgFps" type="range" min="1" max="15" step="1" value="5">
+        <small class="hint">速いほど短時間で送れますが、カメラが追いつかないと取りこぼします。</small>
+      </label>
+
+      <label class="field">
+        <span class="field-label">誤り訂正レベル</span>
+        <select id="cfgEcc">
+          <option value="L">L（〜7%）</option>
+          <option value="M" selected>M（〜15%）</option>
+          <option value="Q">Q（〜25%）</option>
+          <option value="H">H（〜30%）</option>
+        </select>
+        <small class="hint">高いほど読み取りに強くなりますが、同サイズで詰められるデータは減ります。</small>
+      </label>
+
+      <label class="field">
+        <span class="field-label">QRバージョン（typeNumber）</span>
+        <select id="cfgType">
+          <option value="0" selected>自動（推奨）</option>
+          <!-- 1〜40 はスクリプトで生成 -->
+        </select>
+        <small class="hint">自動だとペイロード長に応じて最小サイズが選ばれます。固定すると毎フレーム同サイズで描画。</small>
+      </label>
+
+      <label class="field">
+        <span class="field-label">セルサイズ（px / モジュール）<output id="outCell">8</output></span>
+        <input id="cfgCell" type="range" min="2" max="20" step="1" value="8">
+      </label>
+
+      <label class="field">
+        <span class="field-label">マージン（モジュール）<output id="outMargin">4</output></span>
+        <input id="cfgMargin" type="range" min="0" max="10" step="1" value="4">
+      </label>
+
+      <h2>受信側の設定</h2>
+
+      <label class="field">
+        <span class="field-label">カメラの向き</span>
+        <select id="cfgFacing">
+          <option value="environment" selected>背面カメラ（推奨）</option>
+          <option value="user">前面カメラ</option>
+        </select>
+      </label>
+
+      <label class="field">
+        <span class="field-label">取り込み解像度</span>
+        <select id="cfgResolution">
+          <option value="320">320 × 240（軽量）</option>
+          <option value="640" selected>640 × 480（標準）</option>
+          <option value="1280">1280 × 720（高精細）</option>
+        </select>
+        <small class="hint">高解像度ほどCPU負荷が上がりますが小さなQRも読めます。</small>
+      </label>
+
+      <label class="field">
+        <span class="field-label">反転試行（jsQR inversionAttempts）</span>
+        <select id="cfgInversion">
+          <option value="dontInvert" selected>dontInvert（明背景・黒QR）</option>
+          <option value="onlyInvert">onlyInvert</option>
+          <option value="attemptBoth">attemptBoth</option>
+          <option value="invertFirst">invertFirst</option>
+        </select>
+      </label>
+
+      <h2>その他</h2>
+
+      <div class="row">
+        <button id="btnResetSettings" class="btn">設定を初期値に戻す</button>
+      </div>
+      <p class="hint">設定はブラウザの <code>localStorage</code> に保存され、次回起動時に復元されます。外部送信は一切行いません。</p>
+    </section>
+  </main>
+
+  <footer>
+    <small>
+      vendor: <a href="vendor/qrcode-generator.js">qrcode-generator</a> (MIT) /
+      <a href="vendor/jsQR.js">jsQR</a> (Apache-2.0). 通信は一切発生しません。
+    </small>
+  </footer>
+
+  <script src="vendor/qrcode-generator.js"></script>
+  <script src="vendor/jsQR.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
