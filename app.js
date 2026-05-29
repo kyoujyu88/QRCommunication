@@ -48,7 +48,7 @@
   const btnSendStop = $('btnSendStop');
   const sendStatus = $('sendStatus');
   const qrCanvas = $('qrCanvas');
-  const modeRadios = document.querySelectorAll('input[name="sendMode"]');
+  const modeButtons = document.querySelectorAll('.mode-opt');
   const modePanels = document.querySelectorAll('[data-mode-panel]');
 
   const btnRecvStart = $('btnRecvStart');
@@ -185,16 +185,21 @@
   // ----------------------------------------------------------------------
 
   function currentSendMode() {
-    for (const r of modeRadios) if (r.checked) return r.value;
+    for (const b of modeButtons) if (b.classList.contains('is-active')) return b.dataset.mode;
     return 'text';
   }
 
   function applySendMode(mode) {
+    for (const b of modeButtons) {
+      const active = b.dataset.mode === mode;
+      b.classList.toggle('is-active', active);
+      b.setAttribute('aria-selected', active ? 'true' : 'false');
+    }
     for (const p of modePanels) p.hidden = p.dataset.modePanel !== mode;
   }
 
-  for (const r of modeRadios) {
-    r.addEventListener('change', () => applySendMode(currentSendMode()));
+  for (const b of modeButtons) {
+    b.addEventListener('click', () => applySendMode(b.dataset.mode));
   }
 
   sendFile.addEventListener('change', () => {
@@ -509,7 +514,7 @@
     sendRepoOwner.disabled = disabled;
     sendRepoName.disabled = disabled;
     sendRepoRef.disabled = disabled;
-    for (const r of modeRadios) r.disabled = disabled;
+    for (const b of modeButtons) b.disabled = disabled;
   }
 
   btnSendStart.addEventListener('click', startSend);
