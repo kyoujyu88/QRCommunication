@@ -42,20 +42,11 @@
       </div>
 
       <div data-mode-panel="repo" class="mode-panel" hidden>
-        <div class="repo-grid">
-          <label class="field">
-            <span class="field-label">owner</span>
-            <input id="sendRepoOwner" type="text" placeholder="kyoujyu88" autocomplete="off">
-          </label>
-          <label class="field">
-            <span class="field-label">repository</span>
-            <input id="sendRepoName" type="text" placeholder="QRCommunication" autocomplete="off">
-          </label>
-          <label class="field">
-            <span class="field-label">ref（branch / tag / commit、省略可）</span>
-            <input id="sendRepoRef" type="text" placeholder="(default branch)" autocomplete="off">
-          </label>
-        </div>
+        <label class="field">
+          <span class="field-label">GitHub URL または <code>owner/repo[@ref]</code></span>
+          <input id="sendRepoUrl" type="text" placeholder="https://github.com/kyoujyu88/QRCommunication" autocomplete="off" spellcheck="false">
+          <small id="sendRepoParsed" class="hint">URL またはショート形式を貼り付けてください</small>
+        </label>
         <p class="hint">「QR表示開始」を押すと <code>api.github.com</code> から zipball を取得して送信を開始します。公開リポジトリのみ。</p>
       </div>
 
