@@ -20,10 +20,45 @@
   <main>
     <!-- =========================== Send =========================== -->
     <section id="paneSend" class="pane is-active" role="tabpanel">
-      <label class="field">
-        <span class="field-label">送信テキスト</span>
-        <textarea id="sendInput" placeholder="ここに送信するテキストを入力" rows="6"></textarea>
-      </label>
+      <div class="mode-row" role="radiogroup" aria-label="送信モード">
+        <label class="mode-opt"><input type="radio" name="sendMode" value="text" checked> テキスト</label>
+        <label class="mode-opt"><input type="radio" name="sendMode" value="file"> ファイル</label>
+        <label class="mode-opt"><input type="radio" name="sendMode" value="repo"> GitHubリポジトリ</label>
+      </div>
+
+      <div data-mode-panel="text" class="mode-panel">
+        <label class="field">
+          <span class="field-label">送信テキスト</span>
+          <textarea id="sendInput" placeholder="ここに送信するテキストを入力" rows="6"></textarea>
+        </label>
+      </div>
+
+      <div data-mode-panel="file" class="mode-panel" hidden>
+        <label class="field">
+          <span class="field-label">送信ファイル</span>
+          <input id="sendFile" type="file">
+          <div id="sendFileInfo" class="hint">ファイル未選択</div>
+        </label>
+      </div>
+
+      <div data-mode-panel="repo" class="mode-panel" hidden>
+        <div class="repo-grid">
+          <label class="field">
+            <span class="field-label">owner</span>
+            <input id="sendRepoOwner" type="text" placeholder="kyoujyu88" autocomplete="off">
+          </label>
+          <label class="field">
+            <span class="field-label">repository</span>
+            <input id="sendRepoName" type="text" placeholder="QRCommunication" autocomplete="off">
+          </label>
+          <label class="field">
+            <span class="field-label">ref（branch / tag / commit、省略可）</span>
+            <input id="sendRepoRef" type="text" placeholder="(default branch)" autocomplete="off">
+          </label>
+        </div>
+        <p class="hint">「QR表示開始」を押すと <code>api.github.com</code> から zipball を取得して送信を開始します。公開リポジトリのみ。</p>
+      </div>
+
       <div class="row">
         <button id="btnSendStart" class="btn primary">QR表示開始</button>
         <button id="btnSendStop" class="btn" disabled>停止</button>
@@ -51,13 +86,19 @@
         <div id="recvStatus" class="status">未開始</div>
       </div>
       <div id="recvGrid" class="grid" aria-label="受信済みチャンク"></div>
-      <label class="field">
-        <span class="field-label">復元テキスト</span>
-        <textarea id="recvOutput" rows="6" readonly placeholder="（受信中…）"></textarea>
-      </label>
-      <div class="row">
-        <button id="btnCopy" class="btn" disabled>コピー</button>
+
+      <div id="recvResult" class="recv-result" hidden>
+        <div id="recvResultInfo" class="recv-result-info"></div>
+        <div class="row">
+          <button id="btnDownload" class="btn primary" disabled>ダウンロード</button>
+          <button id="btnCopy" class="btn" disabled>テキストをコピー</button>
+        </div>
+        <label class="field" id="recvTextField" hidden>
+          <span class="field-label">復元テキスト</span>
+          <textarea id="recvOutput" rows="6" readonly placeholder="（受信中…）"></textarea>
+        </label>
       </div>
+
       <p id="httpsWarn" class="warn" hidden>
         カメラ起動には HTTPS または <code>http://localhost</code> が必要です。
         現在のURLでは <code>getUserMedia</code> が使えない可能性があります。
