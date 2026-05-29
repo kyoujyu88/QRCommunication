@@ -252,21 +252,22 @@ h2:first-of-type { border-top: 0; padding-top: 0; }
 .mode-opt {
   flex: 1 1 auto;
   text-align: center;
-  padding: 6px 10px;
+  padding: 8px 10px;
+  font: inherit;
   font-size: 0.9rem;
   color: var(--muted);
   cursor: pointer;
+  border: 0;
+  background: transparent;
   border-radius: 6px;
   transition: background 0.12s, color 0.12s;
+  -webkit-tap-highlight-color: transparent;
 }
 
-.mode-opt:hover { color: var(--fg); }
+.mode-opt:hover:not(:disabled) { color: var(--fg); }
+.mode-opt:disabled { opacity: 0.5; cursor: not-allowed; }
 
-.mode-opt input {
-  display: none;
-}
-
-.mode-opt:has(input:checked) {
+.mode-opt.is-active {
   background: var(--accent);
   color: var(--accent-fg);
 }

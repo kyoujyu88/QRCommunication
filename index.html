@@ -20,10 +20,10 @@
   <main>
     <!-- =========================== Send =========================== -->
     <section id="paneSend" class="pane is-active" role="tabpanel">
-      <div class="mode-row" role="radiogroup" aria-label="送信モード">
-        <label class="mode-opt"><input type="radio" name="sendMode" value="text" checked> テキスト</label>
-        <label class="mode-opt"><input type="radio" name="sendMode" value="file"> ファイル</label>
-        <label class="mode-opt"><input type="radio" name="sendMode" value="repo"> GitHubリポジトリ</label>
+      <div class="mode-row" role="tablist" aria-label="送信モード">
+        <button type="button" class="mode-opt is-active" data-mode="text" role="tab" aria-selected="true">テキスト</button>
+        <button type="button" class="mode-opt" data-mode="file" role="tab" aria-selected="false">ファイル</button>
+        <button type="button" class="mode-opt" data-mode="repo" role="tab" aria-selected="false">GitHubリポジトリ</button>
       </div>
 
       <div data-mode-panel="text" class="mode-panel">
