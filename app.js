@@ -380,6 +380,86 @@
   }
 
   // ----------------------------------------------------------------------
+  // GitHub repo → zip (client-side packaging, avoids codeload.github.com
+  // CORS by walking the Git Data API + raw.githubusercontent.com which
+  // both serve Access-Control-Allow-Origin: *)
+  // ----------------------------------------------------------------------
+
+  async function fetchRepoAsZip(spec, onProgress) {
+    const onP = onProgress || (() => {});
+    const { owner, repo } = spec;
+    let ref = spec.ref;
+
+    if (!ref) {
+      onP(`デフォルトブランチを確認中: ${owner}/${repo}…`);
+      const info = await ghJson(`repos/${owner}/${repo}`);
+      ref = info.default_branch;
+      if (!ref) throw new Error('default_branch を取得できませんでした');
+    }
+
+    onP(`ツリー取得中: ${owner}/${repo}@${ref}…`);
+    const tree = await ghJson(`repos/${owner}/${repo}/git/trees/${encodeURIComponent(ref)}?recursive=1`);
+    if (!tree || !Array.isArray(tree.tree)) throw new Error('tree レスポンスが不正');
+    const blobs = tree.tree.filter((e) => e.type === 'blob');
+    if (tree.truncated) {
+      onP(`⚠ ツリーが大きすぎて切り詰められました (${blobs.length}件)。一部のみ取得します`);
+    }
+    if (blobs.length === 0) throw new Error('対象ファイルが見つかりません');
+
+    const fetched = new Array(blobs.length);
+    let done = 0;
+    const CONCURRENCY = 8;
+    let next = 0;
+    async function worker() {
+      while (true) {
+        const i = next++;
+        if (i >= blobs.length) return;
+        const entry = blobs[i];
+        const url = `https://raw.githubusercontent.com/${owner}/${repo}/${encodeURIComponent(ref)}/${entry.path.split('/').map(encodeURIComponent).join('/')}`;
+        const res = await fetch(url);
+        if (!res.ok) throw new Error(`${entry.path}: HTTP ${res.status}`);
+        const buf = await res.arrayBuffer();
+        fetched[i] = { path: entry.path, bytes: new Uint8Array(buf) };
+        done++;
+        if (done % 5 === 0 || done === blobs.length) {
+          onP(`ファイル取得中: ${done} / ${blobs.length} (${owner}/${repo}@${ref})`);
+        }
+      }
+    }
+    await Promise.all(Array.from({ length: Math.min(CONCURRENCY, blobs.length) }, worker));
+
+    onP(`zip 生成中 (${blobs.length}件)…`);
+    const refSafe = ref.replace(/[^\w.-]/g, '_');
+    const rootDir = `${owner}-${repo}-${refSafe}/`;
+    const files = {};
+    for (const f of fetched) {
+      files[rootDir + f.path] = f.bytes;
+    }
+    const zipBytes = fflate.zipSync(files, { level: 6 });
+
+    return {
+      body: zipBytes,
+      manifest: {
+        kind: 'repo',
+        name: `${owner}-${repo}-${refSafe}.zip`,
+        mime: 'application/zip',
+        owner, repo, ref,
+      },
+    };
+  }
+
+  async function ghJson(path) {
+    const url = `https://api.github.com/${path}`;
+    const res = await fetch(url, { headers: { Accept: 'application/vnd.github+json' } });
+    if (!res.ok) {
+      if (res.status === 403) throw new Error('GitHub API rate limit に達しました（未認証は60req/hour）');
+      if (res.status === 404) throw new Error(`見つかりません: ${path}`);
+      throw new Error(`GitHub API HTTP ${res.status}`);
+    }
+    return res.json();
+  }
+
+  // ----------------------------------------------------------------------
   // Send data gathering (per mode)
   // ----------------------------------------------------------------------
 
@@ -408,24 +488,10 @@
     if (mode === 'repo') {
       const spec = parseRepoSpec(sendRepoUrl.value);
       if (!spec) throw new Error('GitHub URL または owner/repo[@ref] を入力してください');
-      const { owner, repo, ref } = spec;
-      const url = ref
-        ? `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/zipball/${encodeURIComponent(ref)}`
-        : `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/zipball`;
-      sendStatus.textContent = `GitHub から取得中: ${owner}/${repo}${ref ? '@' + ref : ''}…`;
-      const res = await fetch(url, { headers: { Accept: 'application/vnd.github+json' } });
-      if (!res.ok) {
-        if (res.status === 403) throw new Error('rate limit または非公開リポジトリの可能性');
-        if (res.status === 404) throw new Error('リポジトリ／ref が見つかりません');
-        throw new Error(`HTTP ${res.status}`);
-      }
-      const buf = await res.arrayBuffer();
-      const refSafe = (ref || 'HEAD').replace(/[^\w.-]/g, '_');
-      const name = `${owner}-${repo}-${refSafe}.zip`;
-      return {
-        manifest: { kind: 'repo', name, mime: 'application/zip', owner, repo, ref: ref || null },
-        body: new Uint8Array(buf),
-      };
+      const { body, manifest } = await fetchRepoAsZip(spec, (msg) => {
+        sendStatus.textContent = msg;
+      });
+      return { manifest, body };
     }
     throw new Error(`不明なモード: ${mode}`);
   }
