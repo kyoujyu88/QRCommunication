@@ -41,9 +41,8 @@
   const sendInput = $('sendInput');
   const sendFile = $('sendFile');
   const sendFileInfo = $('sendFileInfo');
-  const sendRepoOwner = $('sendRepoOwner');
-  const sendRepoName = $('sendRepoName');
-  const sendRepoRef = $('sendRepoRef');
+  const sendRepoUrl = $('sendRepoUrl');
+  const sendRepoParsed = $('sendRepoParsed');
   const btnSendStart = $('btnSendStart');
   const btnSendStop = $('btnSendStop');
   const sendStatus = $('sendStatus');
@@ -209,6 +208,51 @@
       : 'ファイル未選択';
   });
 
+  // Accepts:
+  //   https://github.com/owner/repo[.git][/tree/<ref>[/...]]
+  //   git@github.com:owner/repo[.git]
+  //   owner/repo[@ref]
+  function parseRepoSpec(input) {
+    const s = (input || '').trim();
+    if (!s) return null;
+    let m = s.match(/^git@github\.com:([^/]+)\/(.+?)(?:\.git)?$/);
+    if (m) return { owner: m[1], repo: m[2], ref: '' };
+    if (/^https?:\/\//i.test(s)) {
+      let u;
+      try { u = new URL(s); } catch { return null; }
+      const host = u.hostname.toLowerCase().replace(/^www\./, '');
+      if (host !== 'github.com') return null;
+      const parts = u.pathname.replace(/^\/+/, '').replace(/\/+$/, '').split('/');
+      if (parts.length < 2 || !parts[0] || !parts[1]) return null;
+      const owner = decodeURIComponent(parts[0]);
+      const repo = decodeURIComponent(parts[1]).replace(/\.git$/, '');
+      let ref = '';
+      if (parts.length > 3 && /^(tree|commit|blob)$/.test(parts[2])) {
+        ref = parts.slice(3).map(decodeURIComponent).join('/');
+      }
+      return { owner, repo, ref };
+    }
+    m = s.match(/^([^/\s@]+)\/([^@\s]+?)(?:@(.+))?$/);
+    if (m) return { owner: m[1], repo: m[2].replace(/\.git$/, ''), ref: m[3] || '' };
+    return null;
+  }
+
+  function updateRepoPreview() {
+    const spec = parseRepoSpec(sendRepoUrl.value);
+    if (!spec) {
+      sendRepoParsed.textContent = sendRepoUrl.value
+        ? '⚠ 解釈できませんでした。URL または owner/repo[@ref] を入力してください'
+        : 'URL またはショート形式を貼り付けてください';
+      sendRepoParsed.classList.toggle('warn-inline', !!sendRepoUrl.value);
+      return;
+    }
+    sendRepoParsed.classList.remove('warn-inline');
+    sendRepoParsed.textContent =
+      `→ ${spec.owner}/${spec.repo}${spec.ref ? ' @ ' + spec.ref : ' (デフォルトブランチ)'}`;
+  }
+
+  sendRepoUrl.addEventListener('input', updateRepoPreview);
+
   // ----------------------------------------------------------------------
   // Byte / base64 helpers
   // ----------------------------------------------------------------------
@@ -362,10 +406,9 @@
       };
     }
     if (mode === 'repo') {
-      const owner = sendRepoOwner.value.trim();
-      const repo = sendRepoName.value.trim();
-      const ref = sendRepoRef.value.trim();
-      if (!owner || !repo) throw new Error('owner と repository を入力してください');
+      const spec = parseRepoSpec(sendRepoUrl.value);
+      if (!spec) throw new Error('GitHub URL または owner/repo[@ref] を入力してください');
+      const { owner, repo, ref } = spec;
       const url = ref
         ? `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/zipball/${encodeURIComponent(ref)}`
         : `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/zipball`;
@@ -373,7 +416,7 @@
       const res = await fetch(url, { headers: { Accept: 'application/vnd.github+json' } });
       if (!res.ok) {
         if (res.status === 403) throw new Error('rate limit または非公開リポジトリの可能性');
-        if (res.status === 404) throw new Error('リポジトリが見つかりません');
+        if (res.status === 404) throw new Error('リポジトリ／ref が見つかりません');
         throw new Error(`HTTP ${res.status}`);
       }
       const buf = await res.arrayBuffer();
@@ -511,9 +554,7 @@
   function setSendInputsDisabled(disabled) {
     sendInput.disabled = disabled;
     sendFile.disabled = disabled;
-    sendRepoOwner.disabled = disabled;
-    sendRepoName.disabled = disabled;
-    sendRepoRef.disabled = disabled;
+    sendRepoUrl.disabled = disabled;
     for (const b of modeButtons) b.disabled = disabled;
   }
 

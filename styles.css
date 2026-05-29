@@ -274,17 +274,6 @@ h2:first-of-type { border-top: 0; padding-top: 0; }
 
 .mode-panel { margin: 8px 0 0; }
 
-.repo-grid {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 0 12px;
-}
-.repo-grid .field:last-child { grid-column: 1 / -1; }
-
-@media (max-width: 480px) {
-  .repo-grid { grid-template-columns: 1fr; }
-}
-
 input[type=file] {
   width: 100%;
   background: var(--panel);
@@ -294,6 +283,10 @@ input[type=file] {
   padding: 10px 12px;
   font: inherit;
   font-size: 0.9rem;
+}
+
+.warn-inline {
+  color: var(--warn);
 }
 
 .recv-result {
