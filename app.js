@@ -253,6 +253,18 @@
   let sendFrames = [];
   let sendIndex = 0;
 
+  // Auto-pick a single typeNumber covering the longest frame so every chunk
+  // renders at the same QR size — keeps layout from re-flowing between
+  // frames and helps the receiver's camera stay focused.
+  function resolveTypeNumber(frames, ecc) {
+    let longest = frames[0];
+    for (const f of frames) if (f.length > longest.length) longest = f;
+    const qr = qrcode(0, ecc);
+    qr.addData(longest, 'Byte');
+    qr.make();
+    return (qr.getModuleCount() - 17) / 4;
+  }
+
   function startSend() {
     const text = sendInput.value;
     if (!text) {
@@ -269,8 +281,18 @@
     sendInput.disabled = true;
 
     const tickMs = Math.max(50, Math.round(1000 / s.fps));
+    let typeNumber = s.typeNumber;
+    if (typeNumber === 0) {
+      try {
+        typeNumber = resolveTypeNumber(frames, s.ecc);
+      } catch (err) {
+        sendStatus.textContent = `QR生成エラー: ${err.message}（チャンクサイズを下げてください）`;
+        stopSend();
+        return;
+      }
+    }
     const renderOpts = {
-      typeNumber: s.typeNumber,
+      typeNumber,
       ecc: s.ecc,
       cellSize: s.cellSize,
       margin: s.margin,
