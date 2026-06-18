@@ -71,6 +71,14 @@
       <div class="video-wrap">
         <video id="cam" playsinline muted autoplay></video>
         <canvas id="scanCanvas" hidden></canvas>
+        <div class="scan-frame" aria-hidden="true">
+          <div class="scan-frame-box">
+            <span class="corner tl"></span>
+            <span class="corner tr"></span>
+            <span class="corner bl"></span>
+            <span class="corner br"></span>
+          </div>
+        </div>
       </div>
       <div class="recv-status">
         <progress id="recvProgress" value="0" max="1"></progress>
