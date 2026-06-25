@@ -683,7 +683,6 @@
     }
 
     btnSendStop.disabled = false;
-    btnRangeApply.disabled = false;
     setSendInputsDisabled(true);
     startSendLoop();
   }
@@ -692,7 +691,6 @@
     clearSendTimer();
     btnSendStart.disabled = false;
     btnSendStop.disabled = true;
-    btnRangeApply.disabled = true;
     setSendInputsDisabled(false);
     sendBusy = false;
     if (sendAllFrames.length) {
@@ -705,8 +703,13 @@
   }
 
   btnRangeApply.addEventListener('click', () => {
-    if (!sendAllFrames.length) return;
-    if (applyRangeFromInput()) startSendLoop();
+    if (sendAllFrames.length) {
+      // Active transfer: swap the looping subset without re-gathering data.
+      if (applyRangeFromInput()) startSendLoop();
+    } else {
+      // Nothing started yet: begin a transfer honoring the range field.
+      startSend();
+    }
   });
 
   function setSendInputsDisabled(disabled) {
