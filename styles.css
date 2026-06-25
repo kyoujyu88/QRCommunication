@@ -233,6 +233,49 @@ input[type=range] {
 .scan-frame .corner.bl { bottom: -3px; left: -3px;    border-right: 0; border-top: 0;    border-bottom-left-radius: 6px; }
 .scan-frame .corner.br { bottom: -3px; right: -3px;   border-left: 0;  border-top: 0;    border-bottom-right-radius: 6px; }
 
+.range-row {
+  align-items: center;
+  gap: 6px;
+}
+.range-label {
+  flex: 0 0 auto;
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+.range-input {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.missing-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin: 6px 0 0;
+  font-size: 0.85rem;
+}
+.missing-label {
+  flex: 0 0 auto;
+  color: var(--muted);
+  padding-top: 4px;
+}
+.missing-list {
+  flex: 1 1 auto;
+  min-width: 0;
+  word-break: break-all;
+  background: var(--panel);
+  padding: 4px 8px;
+  border-radius: 4px;
+  color: var(--warn);
+}
+.missing-row.is-complete .missing-list {
+  color: var(--ok);
+}
+.btn-sm {
+  padding: 4px 10px;
+  font-size: 0.82rem;
+}
+
 .recv-status {
   margin: 8px 0;
 }
