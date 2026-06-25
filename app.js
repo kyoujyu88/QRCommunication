@@ -47,6 +47,8 @@
   const btnSendStop = $('btnSendStop');
   const sendStatus = $('sendStatus');
   const qrCanvas = $('qrCanvas');
+  const sendRange = $('sendRange');
+  const btnRangeApply = $('btnRangeApply');
   const modeButtons = document.querySelectorAll('.mode-opt');
   const modePanels = document.querySelectorAll('[data-mode-panel]');
 
@@ -65,6 +67,9 @@
   const btnCopy = $('btnCopy');
   const btnDownload = $('btnDownload');
   const httpsWarn = $('httpsWarn');
+  const recvMissingRow = $('recvMissingRow');
+  const recvMissingList = $('recvMissingList');
+  const btnCopyMissing = $('btnCopyMissing');
 
   const cfg = {
     chunkSize: $('cfgChunkSize'),
@@ -299,6 +304,42 @@
     return `${(n / 1024 / 1024).toFixed(2)} MB`;
   }
 
+  // Parse "5,12,18-25" → sorted unique 0-based indices. Empty → null (= all).
+  // Throws Error on bad syntax or out-of-range values.
+  function parseFrameRange(input, total) {
+    const s = (input || '').trim();
+    if (!s) return null;
+    const out = new Set();
+    for (const part of s.split(/[,\s]+/).filter(Boolean)) {
+      const m = part.match(/^(\d+)(?:-(\d+))?$/);
+      if (!m) throw new Error(`不正な範囲: "${part}"`);
+      const a = +m[1];
+      const b = m[2] ? +m[2] : a;
+      if (a < 1 || b < 1 || a > total || b > total) {
+        throw new Error(`範囲外: "${part}" (1〜${total})`);
+      }
+      if (a > b) throw new Error(`範囲が逆順: "${part}"`);
+      for (let i = a; i <= b; i++) out.add(i - 1);
+    }
+    return Array.from(out).sort((x, y) => x - y);
+  }
+
+  // Format 0-based indices into compact 1-based range string: [0,1,2,5,8,9] → "1-3,6,9-10"
+  function formatIndexRanges(indices) {
+    if (!indices.length) return '';
+    const sorted = [...indices].sort((a, b) => a - b);
+    const out = [];
+    let s = sorted[0], p = sorted[0];
+    for (let i = 1; i < sorted.length; i++) {
+      const v = sorted[i];
+      if (v === p + 1) { p = v; continue; }
+      out.push(s === p ? `${s + 1}` : `${s + 1}-${p + 1}`);
+      s = v; p = v;
+    }
+    out.push(s === p ? `${s + 1}` : `${s + 1}-${p + 1}`);
+    return out.join(',');
+  }
+
   function sanitizeFilename(name, fallback) {
     let s = (name || fallback || 'received.bin').replace(/[\/\\:*?"<>|\x00-\x1f]/g, '_');
     s = s.replace(/^\.+/, '_');
@@ -514,9 +555,64 @@
   // ----------------------------------------------------------------------
 
   let sendTimer = null;
-  let sendFrames = [];
-  let sendIndex = 0;
+  let sendAllFrames = [];   // full frame string array (immutable per transfer)
+  let sendActive = [];      // 0-based indices into sendAllFrames currently looping
+  let sendIndex = 0;        // cursor within sendActive
+  let sendRenderOpts = null;
+  let sendTickMs = 500;
+  let sendMeta = null;      // { kind, sizeLabel }
   let sendBusy = false;
+
+  function clearSendTimer() {
+    if (sendTimer) { clearInterval(sendTimer); sendTimer = null; }
+  }
+
+  function startSendLoop() {
+    clearSendTimer();
+    sendIndex = 0;
+    if (!sendActive.length) {
+      sendStatus.textContent = '送信対象がありません';
+      return;
+    }
+    const tick = () => {
+      const realIdx = sendActive[sendIndex];
+      const frame = sendAllFrames[realIdx];
+      try {
+        drawQrToCanvas(qrCanvas, frame, sendRenderOpts);
+      } catch (err) {
+        sendStatus.textContent = `QR生成エラー: ${err.message}（typeNumber を上げるかチャンクサイズを下げてください）`;
+        stopSend();
+        return;
+      }
+      const total = sendAllFrames.length;
+      const subsetLabel = sendActive.length === total
+        ? ''
+        : ` ｜ 範囲 ${sendActive.length}枚`;
+      sendStatus.textContent =
+        `[${sendMeta.kind}] ${realIdx + 1} / ${total}${subsetLabel} ｜ ${sendMeta.sizeLabel} ｜ loop`;
+      sendIndex = (sendIndex + 1) % sendActive.length;
+    };
+    tick();
+    sendTimer = setInterval(tick, sendTickMs);
+  }
+
+  // Read the user's range input, validate against sendAllFrames, update sendActive.
+  // Returns true on success (caller should restart the loop).
+  function applyRangeFromInput() {
+    if (!sendAllFrames.length) return false;
+    let indices;
+    try {
+      const parsed = parseFrameRange(sendRange.value, sendAllFrames.length);
+      indices = parsed === null
+        ? Array.from({ length: sendAllFrames.length }, (_, i) => i)
+        : parsed;
+    } catch (err) {
+      sendStatus.textContent = `範囲指定エラー: ${err.message}`;
+      return false;
+    }
+    sendActive = indices;
+    return true;
+  }
 
   async function startSend() {
     if (sendBusy) return;
@@ -553,18 +649,16 @@
       return;
     }
 
-    let frames, total;
+    let frames;
     try {
-      const r = encodeFramesFromBytes(blob, s.chunkSize);
-      frames = r.frames; total = r.total;
+      frames = encodeFramesFromBytes(blob, s.chunkSize).frames;
     } catch (err) {
       sendStatus.textContent = `フレーム生成エラー: ${err.message}`;
       btnSendStart.disabled = false;
       sendBusy = false;
       return;
     }
-    sendFrames = frames;
-    sendIndex = 0;
+    sendAllFrames = frames;
 
     let typeNumber = s.typeNumber;
     if (typeNumber === 0) {
@@ -574,48 +668,46 @@
         sendStatus.textContent = `QR生成エラー: ${err.message}（チャンクサイズを下げてください）`;
         btnSendStart.disabled = false;
         sendBusy = false;
+        sendAllFrames = [];
         return;
       }
     }
 
-    const renderOpts = { typeNumber, ecc: s.ecc, cellSize: s.cellSize, margin: s.margin };
-    const tickMs = Math.max(50, Math.round(1000 / s.fps));
+    sendRenderOpts = { typeNumber, ecc: s.ecc, cellSize: s.cellSize, margin: s.margin };
+    sendTickMs = Math.max(50, Math.round(1000 / s.fps));
+    sendMeta = { kind: gathered.manifest.kind, sizeLabel };
+
+    // Honor any pre-filled range; fall back to all on parse error
+    if (!applyRangeFromInput()) {
+      sendActive = Array.from({ length: sendAllFrames.length }, (_, i) => i);
+    }
+
     btnSendStop.disabled = false;
+    btnRangeApply.disabled = false;
     setSendInputsDisabled(true);
-
-    const tick = () => {
-      const frame = sendFrames[sendIndex];
-      try {
-        drawQrToCanvas(qrCanvas, frame, renderOpts);
-      } catch (err) {
-        sendStatus.textContent = `QR生成エラー: ${err.message}（typeNumber を上げるかチャンクサイズを下げてください）`;
-        stopSend();
-        return;
-      }
-      sendStatus.textContent =
-        `[${gathered.manifest.kind}] ${sendIndex + 1} / ${total}（${sizeLabel}, 1周 ${formatDuration(eta)}・loop）`;
-      sendIndex = (sendIndex + 1) % sendFrames.length;
-    };
-
-    tick();
-    sendTimer = setInterval(tick, tickMs);
+    startSendLoop();
   }
 
   function stopSend() {
-    if (sendTimer) {
-      clearInterval(sendTimer);
-      sendTimer = null;
-    }
+    clearSendTimer();
     btnSendStart.disabled = false;
     btnSendStop.disabled = true;
+    btnRangeApply.disabled = true;
     setSendInputsDisabled(false);
     sendBusy = false;
-    if (sendFrames.length) {
-      sendStatus.textContent = `停止（${sendFrames.length}枚生成済み）`;
+    if (sendAllFrames.length) {
+      sendStatus.textContent = `停止（${sendAllFrames.length}枚生成済み）`;
     } else {
       sendStatus.textContent = '待機中';
     }
+    sendAllFrames = [];
+    sendActive = [];
   }
+
+  btnRangeApply.addEventListener('click', () => {
+    if (!sendAllFrames.length) return;
+    if (applyRangeFromInput()) startSendLoop();
+  });
 
   function setSendInputsDisabled(disabled) {
     sendInput.disabled = disabled;
@@ -658,6 +750,28 @@
     btnDownload.disabled = true;
     clearRecvBlobUrl();
     recvFilename = null;
+    recvMissingRow.hidden = true;
+    recvMissingRow.classList.remove('is-complete');
+    recvMissingList.textContent = '—';
+    btnCopyMissing.disabled = true;
+  }
+
+  function updateMissingDisplay() {
+    if (!recvState) return;
+    const missing = [];
+    for (let i = 0; i < recvState.total; i++) {
+      if (recvState.chunks[i] == null) missing.push(i);
+    }
+    if (missing.length === 0) {
+      recvMissingList.textContent = '（全て受信済み）';
+      recvMissingRow.classList.add('is-complete');
+      btnCopyMissing.disabled = true;
+    } else {
+      recvMissingList.textContent = formatIndexRanges(missing);
+      recvMissingRow.classList.remove('is-complete');
+      btnCopyMissing.disabled = false;
+    }
+    recvMissingRow.hidden = false;
   }
 
   function initRecvSession(sessionId, total) {
@@ -684,6 +798,7 @@
     btnDownload.disabled = true;
     clearRecvBlobUrl();
     recvFilename = null;
+    updateMissingDisplay();
   }
 
   function ingestFrame(frame) {
@@ -698,6 +813,7 @@
       `セッション ${recvState.sessionId} : ${recvState.gotCount} / ${recvState.total} 受信`;
     const cell = recvGrid.children[frame.index];
     if (cell) cell.classList.add('got');
+    updateMissingDisplay();
 
     if (recvState.gotCount === recvState.total) {
       try {
@@ -851,6 +967,17 @@
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
+  });
+
+  btnCopyMissing.addEventListener('click', async () => {
+    const txt = recvMissingList.textContent;
+    if (!txt || txt.startsWith('（')) return;
+    try {
+      await navigator.clipboard.writeText(txt);
+      const old = btnCopyMissing.textContent;
+      btnCopyMissing.textContent = 'コピー済み';
+      setTimeout(() => { btnCopyMissing.textContent = old; }, 1200);
+    } catch { /* ignore */ }
   });
 
   btnCopy.addEventListener('click', async () => {

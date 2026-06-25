@@ -55,6 +55,13 @@
         <button id="btnSendStop" class="btn" disabled>停止</button>
         <span id="sendStatus" class="status">待機中</span>
       </div>
+      <div class="row range-row">
+        <label class="range-label" for="sendRange">範囲指定</label>
+        <input id="sendRange" type="text" class="range-input"
+               placeholder="例: 5,12,18-25 （空欄で全て）"
+               autocomplete="off" spellcheck="false">
+        <button id="btnRangeApply" class="btn" disabled>反映</button>
+      </div>
       <div class="qr-wrap">
         <canvas id="qrCanvas" width="320" height="320"></canvas>
       </div>
@@ -85,6 +92,12 @@
         <div id="recvStatus" class="status">未開始</div>
       </div>
       <div id="recvGrid" class="grid" aria-label="受信済みチャンク"></div>
+
+      <div class="missing-row" id="recvMissingRow" hidden>
+        <span class="missing-label">未受信:</span>
+        <code id="recvMissingList" class="missing-list">—</code>
+        <button id="btnCopyMissing" class="btn btn-sm" disabled>コピー</button>
+      </div>
 
       <div id="recvResult" class="recv-result" hidden>
         <div id="recvResultInfo" class="recv-result-info"></div>
