@@ -564,6 +564,24 @@
   let sendTickMs = 500;
   let sendMeta = null;      // { kind, sizeLabel }
   let sendBusy = false;
+  let wakeLock = null;
+
+  async function acquireWakeLock() {
+    if (!('wakeLock' in navigator)) return;
+    try {
+      wakeLock = await navigator.wakeLock.request('screen');
+    } catch (_) { /* 権限拒否やサポート外は黙って無視 */ }
+  }
+
+  function releaseWakeLock() {
+    if (wakeLock) { wakeLock.release(); wakeLock = null; }
+  }
+
+  document.addEventListener('visibilitychange', async () => {
+    if (document.visibilityState === 'visible' && sendBusy) {
+      await acquireWakeLock();
+    }
+  });
 
   function clearSendTimer() {
     if (sendTimer) { clearInterval(sendTimer); sendTimer = null; }
@@ -686,11 +704,13 @@
 
     btnSendStop.disabled = false;
     setSendInputsDisabled(true);
+    acquireWakeLock();
     startSendLoop();
   }
 
   function stopSend() {
     clearSendTimer();
+    releaseWakeLock();
     btnSendStart.disabled = false;
     btnSendStop.disabled = true;
     setSendInputsDisabled(false);
