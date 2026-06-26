@@ -276,6 +276,18 @@ input[type=range] {
   font-size: 0.82rem;
 }
 
+.btn.is-busy {
+  animation: dtmf-pulse 1s ease-in-out infinite;
+  background: var(--accent);
+  color: var(--accent-fg);
+  border-color: var(--accent);
+}
+
+@keyframes dtmf-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.55; }
+}
+
 .recv-status {
   margin: 8px 0;
 }

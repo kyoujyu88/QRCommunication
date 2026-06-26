@@ -60,6 +60,7 @@
         <input id="sendRange" type="text" class="range-input"
                placeholder="例: 5,12,18-25 （空欄で全て）"
                autocomplete="off" spellcheck="false">
+        <button id="btnListenRange" class="btn btn-sm" title="受信端末のDTMF音を聞いて自動入力">🎤 音で受け取る</button>
         <button id="btnRangeApply" class="btn">反映</button>
       </div>
       <div class="qr-wrap">
@@ -97,6 +98,7 @@
         <span class="missing-label">未受信:</span>
         <code id="recvMissingList" class="missing-list">—</code>
         <button id="btnCopyMissing" class="btn btn-sm" disabled>コピー</button>
+        <button id="btnSpeakMissing" class="btn btn-sm" disabled title="未受信番号をDTMF音で送信端末に伝える">🔊 音で送る</button>
       </div>
 
       <div id="recvResult" class="recv-result" hidden>
