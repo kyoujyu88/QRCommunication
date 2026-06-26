@@ -1227,6 +1227,11 @@
 
     source.connect(processor);
     processor.connect(ctx.destination);
+    // iOS/Safari hands back a suspended context; without resume the
+    // ScriptProcessor never fires and detection silently never starts.
+    if (ctx.state === 'suspended') {
+      try { await ctx.resume(); } catch {}
+    }
 
     function stop() {
       if (stopped) return;
@@ -1244,6 +1249,19 @@
 
   let listenStop = null;
   let listenTimer = null;
+  let listening = false;
+  const LISTEN_LABEL = btnListenRange.textContent;
+
+  // Tear down a listen session and restore the button, whether it ends via
+  // success, timeout, error, or a manual cancel tap.
+  function endListen(statusText) {
+    if (listenTimer) { clearInterval(listenTimer); listenTimer = null; }
+    if (listenStop) { try { listenStop(); } catch {} listenStop = null; }
+    listening = false;
+    btnListenRange.classList.remove('is-busy');
+    btnListenRange.textContent = LISTEN_LABEL;
+    if (statusText != null) sendStatus.textContent = statusText;
+  }
 
   btnSpeakMissing.addEventListener('click', async () => {
     const txt = recvMissingList.textContent;
@@ -1267,8 +1285,12 @@
   });
 
   btnListenRange.addEventListener('click', async () => {
-    if (listenStop) { listenStop(); return; }
-    const oldText = btnListenRange.textContent;
+    // A tap while already listening means "stop now".
+    if (listening) { endListen('聞き取りを停止しました'); return; }
+
+    // Mark active synchronously so a second tap during the getUserMedia
+    // await cancels instead of spawning a second listener.
+    listening = true;
     btnListenRange.classList.add('is-busy');
     btnListenRange.textContent = '聞き取り中… (タップで停止)';
     sendStatus.textContent = 'マイクで DTMF を待っています…';
@@ -1279,23 +1301,22 @@
       sendStatus.textContent = `マイクで DTMF を待っています… (残り ${remain}s)`;
     }, 1000);
 
-    const finish = (statusText) => {
-      btnListenRange.classList.remove('is-busy');
-      btnListenRange.textContent = oldText;
-      if (statusText) sendStatus.textContent = statusText;
-      if (listenTimer) { clearInterval(listenTimer); listenTimer = null; }
-      listenStop = null;
-    };
-
-    listenStop = await startDtmfListen({
+    const stop = await startDtmfListen({
       onMessage: (range) => {
         sendRange.value = range;
-        finish(`受信成功: 範囲 ${range}（「反映」で適用）`);
+        endListen(`受信成功: 範囲 ${range}（「反映」で適用）`);
       },
-      onTimeout: () => finish('タイムアウト: DTMF を検出できませんでした'),
-      onError: (err) => finish(`マイク失敗: ${err.message}`),
+      onTimeout: () => endListen('タイムアウト: DTMF を検出できませんでした'),
+      onError: (err) => endListen(`マイク失敗: ${err.message}`),
     });
-    if (!listenStop) finish(null);
+
+    if (!listening) {
+      // User canceled while the mic was still initializing — tear it down.
+      if (stop) { try { stop(); } catch {} }
+      return;
+    }
+    if (!stop) return;   // onError already restored the UI
+    listenStop = stop;
   });
 
   // ----------------------------------------------------------------------
