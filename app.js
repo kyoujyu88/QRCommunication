@@ -70,6 +70,8 @@
   const recvMissingRow = $('recvMissingRow');
   const recvMissingList = $('recvMissingList');
   const btnCopyMissing = $('btnCopyMissing');
+  const btnSpeakMissing = $('btnSpeakMissing');
+  const btnListenRange = $('btnListenRange');
 
   const cfg = {
     chunkSize: $('cfgChunkSize'),
@@ -757,6 +759,7 @@
     recvMissingRow.classList.remove('is-complete');
     recvMissingList.textContent = '—';
     btnCopyMissing.disabled = true;
+    btnSpeakMissing.disabled = true;
   }
 
   function updateMissingDisplay() {
@@ -769,10 +772,12 @@
       recvMissingList.textContent = '（全て受信済み）';
       recvMissingRow.classList.add('is-complete');
       btnCopyMissing.disabled = true;
+      btnSpeakMissing.disabled = true;
     } else {
       recvMissingList.textContent = formatIndexRanges(missing);
       recvMissingRow.classList.remove('is-complete');
       btnCopyMissing.disabled = false;
+      btnSpeakMissing.disabled = false;
     }
     recvMissingRow.hidden = false;
   }
@@ -993,6 +998,284 @@
       recvOutput.select();
       document.execCommand && document.execCommand('copy');
     }
+  });
+
+  // ----------------------------------------------------------------------
+  // DTMF audio bridge — convey the missing-list between two devices over
+  // the air using touch-tone style dual frequencies. Receiver-of-QR plays
+  // a short tone burst, sender-of-QR listens with the mic and auto-fills
+  // its range field. Fully offline; only the Web Audio API is used.
+  // ----------------------------------------------------------------------
+
+  const DTMF_LOW = [697, 770, 852, 941];
+  const DTMF_HIGH = [1209, 1336, 1477];
+  const DTMF_KEYS = [
+    ['1', '2', '3'],
+    ['4', '5', '6'],
+    ['7', '8', '9'],
+    ['*', '0', '#'],
+  ];
+  const DTMF_KEY_TO_FREQS = (() => {
+    const m = {};
+    for (let r = 0; r < 4; r++) for (let c = 0; c < 3; c++) {
+      m[DTMF_KEYS[r][c]] = [DTMF_LOW[r], DTMF_HIGH[c]];
+    }
+    return m;
+  })();
+  const DTMF_TONE_MS = 120;
+  const DTMF_GAP_MS = 80;
+  const DTMF_LISTEN_TIMEOUT_MS = 15000;
+
+  // Range text (e.g. "5,12,18-25") → DTMF key string (e.g. "*105*12*18#25#")
+  function buildDtmfMessage(rangeText) {
+    const payload = String(rangeText).replace(/,/g, '*').replace(/-/g, '#');
+    if (payload.length > 99) throw new Error('番号が多すぎます');
+    const len = String(payload.length).padStart(2, '0');
+    return '*' + len + payload + '#';
+  }
+
+  // Pull the first complete frame out of a rolling key stream.
+  // Returns the decoded range text (e.g. "5,12,18-25") or null if not yet
+  // complete. Caller is expected to keep appending keys and re-call.
+  function parseDtmfFrame(stream) {
+    const start = stream.indexOf('*');
+    if (start < 0) return { ready: false, consumed: 0 };
+    if (stream.length < start + 3) return { ready: false, consumed: 0 };
+    const lenStr = stream.substr(start + 1, 2);
+    if (!/^\d{2}$/.test(lenStr)) return { ready: false, consumed: start + 1 };
+    const len = +lenStr;
+    const payloadStart = start + 3;
+    const payloadEnd = payloadStart + len;
+    if (stream.length < payloadEnd + 1) return { ready: false, consumed: 0 };
+    const end = stream[payloadEnd];
+    if (end !== '#') return { ready: false, consumed: payloadEnd + 1 };
+    const payload = stream.substr(payloadStart, len);
+    const range = payload.replace(/\*/g, ',').replace(/#/g, '-');
+    return { ready: true, range, consumed: payloadEnd + 1 };
+  }
+
+  let dtmfPlayCtx = null;
+
+  async function playDtmfSequence(keys, onProgress) {
+    if (dtmfPlayCtx) return; // already playing
+    const AC = window.AudioContext || window.webkitAudioContext;
+    if (!AC) throw new Error('Web Audio API 非対応');
+    const ctx = new AC();
+    dtmfPlayCtx = ctx;
+    try {
+      const gain = ctx.createGain();
+      gain.gain.value = 0.25;
+      gain.connect(ctx.destination);
+      let t = ctx.currentTime + 0.1;
+      for (let i = 0; i < keys.length; i++) {
+        const freqs = DTMF_KEY_TO_FREQS[keys[i]];
+        if (!freqs) continue;
+        const [low, high] = freqs;
+        const o1 = ctx.createOscillator();
+        const o2 = ctx.createOscillator();
+        o1.frequency.value = low;
+        o2.frequency.value = high;
+        const env = ctx.createGain();
+        env.gain.setValueAtTime(0, t);
+        env.gain.linearRampToValueAtTime(1, t + 0.005);
+        env.gain.setValueAtTime(1, t + DTMF_TONE_MS / 1000 - 0.005);
+        env.gain.linearRampToValueAtTime(0, t + DTMF_TONE_MS / 1000);
+        o1.connect(env); o2.connect(env); env.connect(gain);
+        o1.start(t); o2.start(t);
+        o1.stop(t + DTMF_TONE_MS / 1000 + 0.01);
+        o2.stop(t + DTMF_TONE_MS / 1000 + 0.01);
+        t += (DTMF_TONE_MS + DTMF_GAP_MS) / 1000;
+        if (onProgress) onProgress(i + 1, keys.length);
+      }
+      const totalMs = (t - ctx.currentTime) * 1000 + 100;
+      await new Promise((r) => setTimeout(r, totalMs));
+    } finally {
+      try { await ctx.close(); } catch {}
+      dtmfPlayCtx = null;
+    }
+  }
+
+  // Goertzel single-frequency power estimate.
+  function goertzelPower(samples, freq, sampleRate) {
+    const N = samples.length;
+    const k = Math.round(N * freq / sampleRate);
+    const omega = (2 * Math.PI * k) / N;
+    const coeff = 2 * Math.cos(omega);
+    let q1 = 0, q2 = 0;
+    for (let i = 0; i < N; i++) {
+      const q0 = coeff * q1 - q2 + samples[i];
+      q2 = q1;
+      q1 = q0;
+    }
+    return q1 * q1 + q2 * q2 - q1 * q2 * coeff;
+  }
+
+  // Start mic-driven DTMF listener. Returns a stop() function.
+  // onMessage is invoked with the decoded range text when a full frame
+  // arrives; onTimeout fires after no frame in DTMF_LISTEN_TIMEOUT_MS.
+  async function startDtmfListen({ onMessage, onTimeout, onKey, onError }) {
+    const AC = window.AudioContext || window.webkitAudioContext;
+    if (!AC) { onError && onError(new Error('Web Audio API 非対応')); return null; }
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      onError && onError(new Error('マイクAPI非対応')); return null;
+    }
+
+    let stream, ctx, source, processor;
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          echoCancellation: false,
+          noiseSuppression: false,
+          autoGainControl: false,
+        },
+        video: false,
+      });
+    } catch (err) {
+      onError && onError(err);
+      return null;
+    }
+
+    ctx = new AC();
+    source = ctx.createMediaStreamSource(stream);
+    const FRAME = 1024;
+    processor = ctx.createScriptProcessor(FRAME, 1, 1);
+
+    const sampleRate = ctx.sampleRate;
+    let lastKey = null;
+    let stableCount = 0;
+    let silenceCount = 0;
+    let keyStream = '';
+    const REQUIRED_STABLE = 2;     // ~50 ms at 44.1kHz/1024
+    const REQUIRED_SILENCE = 1;
+    const POWER_THRESHOLD = 4e3;   // empirically OK at gain 0.25 / 30cm distance
+    const PAIR_DOMINANCE = 2.0;    // winning freq must beat next-in-group by this ratio
+
+    let stopped = false;
+    let timeoutId = setTimeout(() => {
+      if (!stopped) { stop(); onTimeout && onTimeout(); }
+    }, DTMF_LISTEN_TIMEOUT_MS);
+
+    function detectKey(samples) {
+      const lowPow = DTMF_LOW.map((f) => goertzelPower(samples, f, sampleRate));
+      const highPow = DTMF_HIGH.map((f) => goertzelPower(samples, f, sampleRate));
+      const lowMax = Math.max(...lowPow);
+      const highMax = Math.max(...highPow);
+      if (lowMax < POWER_THRESHOLD || highMax < POWER_THRESHOLD) return null;
+      const lowIdx = lowPow.indexOf(lowMax);
+      const highIdx = highPow.indexOf(highMax);
+      const lowRunner = Math.max(...lowPow.filter((_, i) => i !== lowIdx));
+      const highRunner = Math.max(...highPow.filter((_, i) => i !== highIdx));
+      if (lowMax < lowRunner * PAIR_DOMINANCE) return null;
+      if (highMax < highRunner * PAIR_DOMINANCE) return null;
+      return DTMF_KEYS[lowIdx][highIdx];
+    }
+
+    processor.onaudioprocess = (ev) => {
+      if (stopped) return;
+      const samples = ev.inputBuffer.getChannelData(0);
+      const key = detectKey(samples);
+      if (key) {
+        if (key === lastKey) {
+          stableCount++;
+        } else {
+          lastKey = key;
+          stableCount = 1;
+        }
+        silenceCount = 0;
+        if (stableCount === REQUIRED_STABLE) {
+          // Commit a single keypress, then suppress repeats until a gap.
+          keyStream += key;
+          onKey && onKey(key, keyStream);
+          // Try to parse a complete frame; if found, succeed and stop.
+          const parsed = parseDtmfFrame(keyStream);
+          if (parsed.ready) {
+            stop();
+            onMessage && onMessage(parsed.range);
+            return;
+          }
+          // Cap stream so we don't accumulate forever
+          if (keyStream.length > 200) keyStream = keyStream.slice(-200);
+        }
+      } else {
+        silenceCount++;
+        if (silenceCount >= REQUIRED_SILENCE) {
+          lastKey = null;
+          stableCount = 0;
+        }
+      }
+    };
+
+    source.connect(processor);
+    processor.connect(ctx.destination);
+
+    function stop() {
+      if (stopped) return;
+      stopped = true;
+      clearTimeout(timeoutId);
+      try { processor.disconnect(); } catch {}
+      try { source.disconnect(); } catch {}
+      try { stream.getTracks().forEach((t) => t.stop()); } catch {}
+      try { ctx.close(); } catch {}
+    }
+    return stop;
+  }
+
+  // ---------- DTMF UI wiring -------------------------------------------
+
+  let listenStop = null;
+  let listenTimer = null;
+
+  btnSpeakMissing.addEventListener('click', async () => {
+    const txt = recvMissingList.textContent;
+    if (!txt || txt.startsWith('（')) return;
+    let keys;
+    try { keys = buildDtmfMessage(txt); }
+    catch (err) { recvStatus.textContent = `DTMFエラー: ${err.message}`; return; }
+    btnSpeakMissing.disabled = true;
+    btnSpeakMissing.classList.add('is-busy');
+    const oldText = btnSpeakMissing.textContent;
+    btnSpeakMissing.textContent = '再生中…';
+    try {
+      await playDtmfSequence(keys);
+    } catch (err) {
+      recvStatus.textContent = `再生エラー: ${err.message}`;
+    } finally {
+      btnSpeakMissing.classList.remove('is-busy');
+      btnSpeakMissing.textContent = oldText;
+      btnSpeakMissing.disabled = !!(recvState && recvState.gotCount >= recvState.total);
+    }
+  });
+
+  btnListenRange.addEventListener('click', async () => {
+    if (listenStop) { listenStop(); return; }
+    const oldText = btnListenRange.textContent;
+    btnListenRange.classList.add('is-busy');
+    btnListenRange.textContent = '聞き取り中… (タップで停止)';
+    sendStatus.textContent = 'マイクで DTMF を待っています…';
+    let elapsed = 0;
+    listenTimer = setInterval(() => {
+      elapsed++;
+      const remain = Math.max(0, Math.ceil(DTMF_LISTEN_TIMEOUT_MS / 1000) - elapsed);
+      sendStatus.textContent = `マイクで DTMF を待っています… (残り ${remain}s)`;
+    }, 1000);
+
+    const finish = (statusText) => {
+      btnListenRange.classList.remove('is-busy');
+      btnListenRange.textContent = oldText;
+      if (statusText) sendStatus.textContent = statusText;
+      if (listenTimer) { clearInterval(listenTimer); listenTimer = null; }
+      listenStop = null;
+    };
+
+    listenStop = await startDtmfListen({
+      onMessage: (range) => {
+        sendRange.value = range;
+        finish(`受信成功: 範囲 ${range}（「反映」で適用）`);
+      },
+      onTimeout: () => finish('タイムアウト: DTMF を検出できませんでした'),
+      onError: (err) => finish(`マイク失敗: ${err.message}`),
+    });
+    if (!listenStop) finish(null);
   });
 
   // ----------------------------------------------------------------------
