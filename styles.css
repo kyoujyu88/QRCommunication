@@ -72,6 +72,10 @@ main {
 .pane { display: none; }
 .pane.is-active { display: block; }
 
+.field[hidden] {
+  display: none;
+}
+
 .field {
   display: block;
   margin: 14px 0;
@@ -249,6 +253,10 @@ input[type=range] {
 .range-input {
   flex: 1 1 auto;
   min-width: 0;
+}
+
+.missing-row[hidden] {
+  display: none;
 }
 
 .missing-row {
