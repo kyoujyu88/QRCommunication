@@ -164,6 +164,10 @@ input[type=range] {
   font-size: 0.9rem;
 }
 
+.qr-wrap[hidden] {
+  display: none;
+}
+
 .qr-wrap {
   display: flex;
   justify-content: center;
