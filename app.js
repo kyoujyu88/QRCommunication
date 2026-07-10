@@ -6,6 +6,7 @@
   // ----------------------------------------------------------------------
 
   const PROTOCOL_TAG = 'QRT2';
+  const MISSING_QR_TAG = 'QRTM'; // missing-range side-channel, distinct from data frames
   const STORAGE_KEY = 'qrtt.settings.v1';
   const LARGE_TRANSFER_BYTES = 2 * 1024 * 1024; // 2 MB confirm threshold
 
@@ -72,6 +73,16 @@
   const btnCopyMissing = $('btnCopyMissing');
   const btnSpeakMissing = $('btnSpeakMissing');
   const btnListenRange = $('btnListenRange');
+  const btnShowMissingQr = $('btnShowMissingQr');
+  const btnScanRange = $('btnScanRange');
+  const qrBridgeModal = $('qrBridgeModal');
+  const qrBridgeStatus = $('qrBridgeStatus');
+  const qrBridgeShowWrap = $('qrBridgeShowWrap');
+  const qrBridgeCanvas = $('qrBridgeCanvas');
+  const qrBridgeScanWrap = $('qrBridgeScanWrap');
+  const qrBridgeVideo = $('qrBridgeVideo');
+  const qrBridgeScanCanvas = $('qrBridgeScanCanvas');
+  const btnQrBridgeClose = $('btnQrBridgeClose');
 
   const cfg = {
     chunkSize: $('cfgChunkSize'),
@@ -780,6 +791,7 @@
     recvMissingList.textContent = '—';
     btnCopyMissing.disabled = true;
     btnSpeakMissing.disabled = true;
+    btnShowMissingQr.disabled = true;
   }
 
   function updateMissingDisplay() {
@@ -793,11 +805,13 @@
       recvMissingRow.classList.add('is-complete');
       btnCopyMissing.disabled = true;
       btnSpeakMissing.disabled = true;
+      btnShowMissingQr.disabled = true;
     } else {
       recvMissingList.textContent = formatIndexRanges(missing);
       recvMissingRow.classList.remove('is-complete');
       btnCopyMissing.disabled = false;
       btnSpeakMissing.disabled = false;
+      btnShowMissingQr.disabled = false;
     }
     recvMissingRow.hidden = false;
   }
@@ -1317,6 +1331,99 @@
     }
     if (!stop) return;   // onError already restored the UI
     listenStop = stop;
+  });
+
+  // ---------- QR bridge (missing-range side-channel) --------------------
+  // Visual alternative to the DTMF bridge above: the receiver shows its
+  // missing-range as a small QR, the sender does a one-shot scan of it.
+  // Uses its own canvas/video/stream — never touches sendTimer, scanRaf,
+  // or the module-level `stream` — so the main transfer loops on both
+  // devices keep running underneath, same as the DTMF bridge already does.
+
+  let qrBridgeStream = null;
+  let qrBridgeRaf = null;
+
+  function closeQrBridge() {
+    if (qrBridgeRaf) { cancelAnimationFrame(qrBridgeRaf); qrBridgeRaf = null; }
+    if (qrBridgeStream) {
+      qrBridgeStream.getTracks().forEach((t) => t.stop());
+      qrBridgeStream = null;
+    }
+    qrBridgeVideo.srcObject = null;
+    qrBridgeModal.hidden = true;
+    qrBridgeShowWrap.hidden = true;
+    qrBridgeScanWrap.hidden = true;
+  }
+
+  btnQrBridgeClose.addEventListener('click', () => closeQrBridge());
+
+  btnShowMissingQr.addEventListener('click', () => {
+    const txt = recvMissingList.textContent;
+    if (!txt || txt.startsWith('（')) return;
+    qrBridgeModal.hidden = false;
+    qrBridgeShowWrap.hidden = false;
+    qrBridgeScanWrap.hidden = true;
+    qrBridgeStatus.textContent = '送信端末にこのQRを読み取ってもらってください';
+    try {
+      drawQrToCanvas(qrBridgeCanvas, `${MISSING_QR_TAG}|${txt}`, {
+        typeNumber: 0, ecc: 'M', cellSize: 8, margin: 4,
+      });
+    } catch (err) {
+      qrBridgeStatus.textContent = `QR生成エラー: ${err.message}`;
+    }
+  });
+
+  btnScanRange.addEventListener('click', async () => {
+    if (!qrBridgeModal.hidden) return; // 連打による多重起動を防止
+    // 受信中（メインカメラ使用中）は別カメラを二重に開かない
+    if (stream) {
+      sendStatus.textContent = '受信中はQR読み取りを使えません';
+      return;
+    }
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      sendStatus.textContent = 'このブラウザはカメラAPIに対応していません';
+      return;
+    }
+    qrBridgeModal.hidden = false;
+    qrBridgeScanWrap.hidden = false;
+    qrBridgeShowWrap.hidden = true;
+    qrBridgeStatus.textContent = 'カメラを起動しています…';
+    try {
+      qrBridgeStream = await navigator.mediaDevices.getUserMedia({
+        audio: false,
+        video: { facingMode: { ideal: 'environment' } },
+      });
+    } catch (err) {
+      qrBridgeStatus.textContent = `カメラ起動失敗: ${err.name} ${err.message}`;
+      closeQrBridge();
+      return;
+    }
+    qrBridgeVideo.srcObject = qrBridgeStream;
+    await qrBridgeVideo.play().catch(() => {});
+    qrBridgeStatus.textContent = '相手が表示しているQRを読み取ってください';
+
+    const ctx = qrBridgeScanCanvas.getContext('2d', { willReadFrequently: true });
+    const scanOnce = () => {
+      if (!qrBridgeStream) return; // closed while awaiting a frame
+      if (qrBridgeVideo.readyState >= qrBridgeVideo.HAVE_CURRENT_DATA && qrBridgeVideo.videoWidth > 0) {
+        const w = qrBridgeVideo.videoWidth;
+        const h = qrBridgeVideo.videoHeight;
+        if (qrBridgeScanCanvas.width !== w) qrBridgeScanCanvas.width = w;
+        if (qrBridgeScanCanvas.height !== h) qrBridgeScanCanvas.height = h;
+        ctx.drawImage(qrBridgeVideo, 0, 0, w, h);
+        const img = ctx.getImageData(0, 0, w, h);
+        const code = jsQR(img.data, w, h, { inversionAttempts: 'attemptBoth' });
+        if (code && code.data && code.data.startsWith(MISSING_QR_TAG + '|')) {
+          const range = code.data.slice(MISSING_QR_TAG.length + 1);
+          closeQrBridge();
+          sendRange.value = range;
+          sendStatus.textContent = `受信成功: 範囲 ${range}（「反映」で適用）`;
+          return;
+        }
+      }
+      qrBridgeRaf = requestAnimationFrame(scanOnce);
+    };
+    qrBridgeRaf = requestAnimationFrame(scanOnce);
   });
 
   // ----------------------------------------------------------------------

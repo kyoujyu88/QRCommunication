@@ -61,6 +61,7 @@
                placeholder="例: 5,12,18-25 （空欄で全て）"
                autocomplete="off" spellcheck="false">
         <button id="btnListenRange" class="btn btn-sm" title="受信端末のDTMF音を聞いて自動入力">🎤 音で受け取る</button>
+        <button id="btnScanRange" class="btn btn-sm" title="受信端末が表示するQRを読み取って自動入力">📷 QRで受け取る</button>
         <button id="btnRangeApply" class="btn">反映</button>
       </div>
       <div class="qr-wrap">
@@ -99,6 +100,7 @@
         <code id="recvMissingList" class="missing-list">—</code>
         <button id="btnCopyMissing" class="btn btn-sm" disabled>コピー</button>
         <button id="btnSpeakMissing" class="btn btn-sm" disabled title="未受信番号をDTMF音で送信端末に伝える">🔊 音で送る</button>
+        <button id="btnShowMissingQr" class="btn btn-sm" disabled title="未受信番号をQRコードで送信端末に見せる">📱 QRで送る</button>
       </div>
 
       <div id="recvResult" class="recv-result" hidden>
@@ -212,6 +214,24 @@
       <code>api.github.com</code> と <code>raw.githubusercontent.com</code> に通信します。
     </small>
   </footer>
+
+  <!-- QR bridge: shows/reads a small QR carrying the missing-chunk range,
+       used as a side-channel that doesn't touch the main send/receive loops. -->
+  <div id="qrBridgeModal" class="modal" hidden>
+    <div class="modal-inner">
+      <div id="qrBridgeShowWrap" class="qr-wrap qr-wrap-sm" hidden>
+        <canvas id="qrBridgeCanvas" width="240" height="240"></canvas>
+      </div>
+      <div id="qrBridgeScanWrap" class="video-wrap" hidden>
+        <video id="qrBridgeVideo" playsinline muted autoplay></video>
+        <canvas id="qrBridgeScanCanvas" hidden></canvas>
+      </div>
+      <p id="qrBridgeStatus" class="status"></p>
+      <div class="row">
+        <button id="btnQrBridgeClose" class="btn">閉じる</button>
+      </div>
+    </div>
+  </div>
 
   <script src="vendor/qrcode-generator.js"></script>
   <script src="vendor/jsQR.js"></script>
