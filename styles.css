@@ -424,3 +424,44 @@ code {
   border-radius: 4px;
   font-size: 0.85em;
 }
+
+.modal[hidden] {
+  display: none;
+}
+
+.modal {
+  position: fixed;
+  inset: 0;
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.6);
+  padding: 16px;
+}
+
+.modal-inner {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 16px;
+  width: 100%;
+  max-width: 360px;
+}
+
+.qr-wrap-sm {
+  max-width: 240px;
+  padding: 12px;
+  margin: 0 auto 12px;
+}
+
+.modal .video-wrap {
+  max-width: 320px;
+  margin: 0 auto 12px;
+}
+
+.modal .status {
+  display: block;
+  text-align: center;
+  margin: 0 0 8px;
+}
