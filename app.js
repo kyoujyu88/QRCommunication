@@ -46,6 +46,8 @@
   const sendRepoParsed = $('sendRepoParsed');
   const btnSendStart = $('btnSendStart');
   const btnSendStop = $('btnSendStop');
+  const btnSendPrev = $('btnSendPrev');
+  const btnSendNext = $('btnSendNext');
   const sendStatus = $('sendStatus');
   const qrCanvas = $('qrCanvas');
   const sendRange = $('sendRange');
@@ -596,6 +598,28 @@
     if (sendTimer) { clearInterval(sendTimer); sendTimer = null; }
   }
 
+  // Draws the frame at the current sendIndex, then advances sendIndex to
+  // the next one. Shared by the auto-loop timer and the manual step
+  // buttons below, so a manual step and an auto-tick behave identically.
+  function sendTick() {
+    const realIdx = sendActive[sendIndex];
+    const frame = sendAllFrames[realIdx];
+    try {
+      drawQrToCanvas(qrCanvas, frame, sendRenderOpts);
+    } catch (err) {
+      sendStatus.textContent = `QR生成エラー: ${err.message}（typeNumber を上げるかチャンクサイズを下げてください）`;
+      stopSend();
+      return;
+    }
+    const total = sendAllFrames.length;
+    const subsetLabel = sendActive.length === total
+      ? ''
+      : ` ｜ 範囲 ${sendActive.length}枚`;
+    sendStatus.textContent =
+      `[${sendMeta.kind}] ${realIdx + 1} / ${total}${subsetLabel} ｜ ${sendMeta.sizeLabel} ｜ loop`;
+    sendIndex = (sendIndex + 1) % sendActive.length;
+  }
+
   function startSendLoop() {
     clearSendTimer();
     sendIndex = 0;
@@ -603,27 +627,60 @@
       sendStatus.textContent = '送信対象がありません';
       return;
     }
-    const tick = () => {
-      const realIdx = sendActive[sendIndex];
-      const frame = sendAllFrames[realIdx];
-      try {
-        drawQrToCanvas(qrCanvas, frame, sendRenderOpts);
-      } catch (err) {
-        sendStatus.textContent = `QR生成エラー: ${err.message}（typeNumber を上げるかチャンクサイズを下げてください）`;
-        stopSend();
-        return;
-      }
-      const total = sendAllFrames.length;
-      const subsetLabel = sendActive.length === total
-        ? ''
-        : ` ｜ 範囲 ${sendActive.length}枚`;
-      sendStatus.textContent =
-        `[${sendMeta.kind}] ${realIdx + 1} / ${total}${subsetLabel} ｜ ${sendMeta.sizeLabel} ｜ loop`;
-      sendIndex = (sendIndex + 1) % sendActive.length;
-    };
-    tick();
-    sendTimer = setInterval(tick, sendTickMs);
+    sendTick();
+    sendTimer = setInterval(sendTick, sendTickMs);
   }
+
+  // ---------- Manual step (早送り / 巻き戻し) ----------------------------
+  // sendIndex always points at the frame that will be drawn on the *next*
+  // tick (sendTick draws-then-advances), so stepping forward is just an
+  // extra tick; stepping back needs to rewind past both the frame already
+  // shown and the one sendTick would show next.
+  function stepSendForward() {
+    if (!sendTimer || !sendActive.length) return;
+    clearSendTimer();
+    sendTick();
+    sendTimer = setInterval(sendTick, sendTickMs);
+  }
+
+  function stepSendBackward() {
+    if (!sendTimer || !sendActive.length) return;
+    const len = sendActive.length;
+    sendIndex = ((sendIndex - 2) % len + len) % len;
+    clearSendTimer();
+    sendTick();
+    sendTimer = setInterval(sendTick, sendTickMs);
+  }
+
+  // Runs `stepFn` once immediately on press, then repeatedly while the
+  // button stays pressed (pointer held down), so 早送り/巻き戻し keep
+  // moving for as long as the user holds them, not just a single step.
+  function bindHoldToStep(button, stepFn) {
+    const HOLD_DELAY_MS = 400;
+    const HOLD_REPEAT_MS = 130;
+    let holdTimeout = null;
+    let holdInterval = null;
+
+    function stopHold() {
+      if (holdTimeout) { clearTimeout(holdTimeout); holdTimeout = null; }
+      if (holdInterval) { clearInterval(holdInterval); holdInterval = null; }
+    }
+
+    button.addEventListener('pointerdown', (ev) => {
+      if (button.disabled) return;
+      button.setPointerCapture(ev.pointerId);
+      stepFn();
+      holdTimeout = setTimeout(() => {
+        holdInterval = setInterval(stepFn, HOLD_REPEAT_MS);
+      }, HOLD_DELAY_MS);
+    });
+    button.addEventListener('pointerup', stopHold);
+    button.addEventListener('pointercancel', stopHold);
+    button.addEventListener('pointerleave', stopHold);
+  }
+
+  bindHoldToStep(btnSendPrev, stepSendBackward);
+  bindHoldToStep(btnSendNext, stepSendForward);
 
   // Read the user's range input, validate against sendAllFrames, update sendActive.
   // Returns true on success (caller should restart the loop).
@@ -712,6 +769,8 @@
     }
 
     btnSendStop.disabled = false;
+    btnSendPrev.disabled = false;
+    btnSendNext.disabled = false;
     setSendInputsDisabled(true);
     acquireWakeLock();
     startSendLoop();
@@ -722,6 +781,8 @@
     releaseWakeLock();
     btnSendStart.disabled = false;
     btnSendStop.disabled = true;
+    btnSendPrev.disabled = true;
+    btnSendNext.disabled = true;
     setSendInputsDisabled(false);
     sendBusy = false;
     if (sendAllFrames.length) {

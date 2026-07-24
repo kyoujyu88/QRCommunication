@@ -55,6 +55,10 @@
         <button id="btnSendStop" class="btn" disabled>停止</button>
         <span id="sendStatus" class="status">待機中</span>
       </div>
+      <div class="row">
+        <button id="btnSendPrev" class="btn btn-hold" disabled title="1つ前のチャンクへ（押し続けると連続で戻ります）">⏪ 巻き戻し</button>
+        <button id="btnSendNext" class="btn btn-hold" disabled title="1つ次のチャンクへ（押し続けると連続で進みます）">⏩ 早送り</button>
+      </div>
       <div class="row range-row">
         <label class="range-label" for="sendRange">範囲指定</label>
         <input id="sendRange" type="text" class="range-input"

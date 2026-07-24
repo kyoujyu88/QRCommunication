@@ -139,6 +139,12 @@ input[type=range] {
 .btn:hover:not(:disabled) { background: #2a3040; }
 .btn:disabled { opacity: 0.4; cursor: not-allowed; }
 
+.btn-hold {
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
 .btn.primary {
   background: var(--accent);
   color: var(--accent-fg);
