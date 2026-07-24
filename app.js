@@ -657,7 +657,7 @@
   // moving for as long as the user holds them, not just a single step.
   function bindHoldToStep(button, stepFn) {
     const HOLD_DELAY_MS = 400;
-    const HOLD_REPEAT_MS = 130;
+    const HOLD_REPEAT_MS = 65;
     let holdTimeout = null;
     let holdInterval = null;
 
