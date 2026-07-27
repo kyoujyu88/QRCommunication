@@ -145,6 +145,11 @@ input[type=range] {
   -webkit-user-select: none;
 }
 
+/* QR直下の送り操作。QRが中央寄せなので合わせて中央に置く */
+.transport-row {
+  justify-content: center;
+}
+
 .btn.primary {
   background: var(--accent);
   color: var(--accent-fg);
