@@ -70,6 +70,7 @@
   const btnCopy = $('btnCopy');
   const btnDownload = $('btnDownload');
   const httpsWarn = $('httpsWarn');
+  const wakeLockWarn = $('wakeLockWarn');
   const recvMissingRow = $('recvMissingRow');
   const recvMissingList = $('recvMissingList');
   const btnCopyMissing = $('btnCopyMissing');
@@ -564,6 +565,95 @@
   }
 
   // ----------------------------------------------------------------------
+  // Screen wake lock
+  // ----------------------------------------------------------------------
+  // QRを表示している間も、カメラでスキャンしている間も、画面が消えると転送が
+  // 途切れる。要求元は複数（送信ループ・受信スキャン・QRブリッジ）あって同時に
+  // 走りうるので、理由の集合で参照カウントし、1つでも残っていれば保持する。
+  //
+  // ロックはOS都合（タブ非表示・低電力モード・低バッテリー）でいつでも解放
+  // されるため、release イベントと復帰系イベントの両方から取り直す。
+  // なお Safari は iOS 16.4 未満では非対応、ホーム画面に追加したアプリでは
+  // iOS 18.4 未満で取得できず、HTTPS 以外(secure context 外)ではそもそも API が
+  // 生えない。黙って失敗すると「なぜか画面が消える」だけが残るので警告を出す。
+
+  const WAKE_LOCK_UNSUPPORTED_MSG =
+    'この環境では画面スリープを抑止できません（Screen Wake Lock 非対応）。'
+    + 'HTTPS でない場合は HTTPS 経由で、iOS の場合は 16.4 以降の Safari で開いてください。'
+    + '転送中は端末の自動ロックを一時的にオフにすることをおすすめします。';
+  const WAKE_LOCK_FAILED_MSG =
+    '画面スリープの抑止が解除されました（低電力モードや電池残量が原因の場合があります）。'
+    + '転送中は端末の自動ロックを一時的にオフにすることをおすすめします。';
+
+  let wakeLock = null;
+  const wakeLockReasons = new Set();
+
+  async function acquireWakeLock() {
+    if (!wakeLockReasons.size) return;
+    if (wakeLock && !wakeLock.released) return;
+    if (!('wakeLock' in navigator)) {
+      wakeLockWarn.textContent = WAKE_LOCK_UNSUPPORTED_MSG;
+      wakeLockWarn.hidden = false;
+      return;
+    }
+    // 非表示中の request は必ず失敗するので、復帰イベント側で拾い直す
+    if (document.visibilityState !== 'visible') return;
+
+    let sentinel;
+    try {
+      sentinel = await navigator.wakeLock.request('screen');
+    } catch (_) {
+      wakeLock = null;
+      wakeLockWarn.textContent = WAKE_LOCK_FAILED_MSG;
+      wakeLockWarn.hidden = false;
+      return;
+    }
+    // await 中に全ての要求元が停止していたら、取得したものはそのまま返す
+    if (!wakeLockReasons.size) {
+      sentinel.release().catch(() => {});
+      return;
+    }
+    wakeLock = sentinel;
+    wakeLockWarn.hidden = true;
+
+    const acquiredAt = Date.now();
+    sentinel.addEventListener('release', () => {
+      if (wakeLock === sentinel) wakeLock = null;
+      if (!wakeLockReasons.size) return;          // 自前の解放
+      if (Date.now() - acquiredAt < 1000) {
+        // 取得直後に落とされる＝OSが拒否している。取り直すと無限ループになる。
+        wakeLockWarn.textContent = WAKE_LOCK_FAILED_MSG;
+        wakeLockWarn.hidden = false;
+        return;
+      }
+      if (document.visibilityState === 'visible') acquireWakeLock();
+    });
+  }
+
+  function requestWakeLock(reason) {
+    wakeLockReasons.add(reason);
+    acquireWakeLock();
+  }
+
+  function releaseWakeLock(reason) {
+    wakeLockReasons.delete(reason);
+    if (wakeLockReasons.size) return;   // 別の用途がまだ画面を必要としている
+    wakeLockWarn.hidden = true;
+    const sentinel = wakeLock;
+    wakeLock = null;
+    if (sentinel) sentinel.release().catch(() => {});
+  }
+
+  // iOS では画面ロックからの復帰で visibilitychange が発火しないことがあるため
+  // focus / pageshow からも取り直す。acquireWakeLock は冪等なので重複してよい。
+  const reacquireWakeLock = () => {
+    if (document.visibilityState === 'visible') acquireWakeLock();
+  };
+  document.addEventListener('visibilitychange', reacquireWakeLock);
+  window.addEventListener('focus', reacquireWakeLock);
+  window.addEventListener('pageshow', reacquireWakeLock);
+
+  // ----------------------------------------------------------------------
   // Send loop
   // ----------------------------------------------------------------------
 
@@ -575,24 +665,6 @@
   let sendTickMs = 500;
   let sendMeta = null;      // { kind, sizeLabel }
   let sendBusy = false;
-  let wakeLock = null;
-
-  async function acquireWakeLock() {
-    if (!('wakeLock' in navigator)) return;
-    try {
-      wakeLock = await navigator.wakeLock.request('screen');
-    } catch (_) { /* 権限拒否やサポート外は黙って無視 */ }
-  }
-
-  function releaseWakeLock() {
-    if (wakeLock) { wakeLock.release(); wakeLock = null; }
-  }
-
-  document.addEventListener('visibilitychange', async () => {
-    if (document.visibilityState === 'visible' && sendBusy) {
-      await acquireWakeLock();
-    }
-  });
 
   function clearSendTimer() {
     if (sendTimer) { clearInterval(sendTimer); sendTimer = null; }
@@ -772,13 +844,13 @@
     btnSendPrev.disabled = false;
     btnSendNext.disabled = false;
     setSendInputsDisabled(true);
-    acquireWakeLock();
+    requestWakeLock('send');
     startSendLoop();
   }
 
   function stopSend() {
     clearSendTimer();
-    releaseWakeLock();
+    releaseWakeLock('send');
     btnSendStart.disabled = false;
     btnSendStop.disabled = true;
     btnSendPrev.disabled = true;
@@ -1007,6 +1079,9 @@
     btnRecvStart.disabled = true;
     btnRecvStop.disabled = false;
     recvStatus.textContent = 'スキャン中…';
+    // カメラプレビュー中に画面が保たれる保証はどのOSにも無く、受信側が寝ると
+    // 転送そのものが止まるので、送信側と同じくロックを取る。
+    requestWakeLock('recv');
 
     const ctx = scanCanvas.getContext('2d', { willReadFrequently: true });
     const scan = () => {
@@ -1032,6 +1107,7 @@
   function stopRecv() {
     if (scanRaf) cancelAnimationFrame(scanRaf);
     scanRaf = null;
+    releaseWakeLock('recv');
     if (stream) {
       stream.getTracks().forEach((t) => t.stop());
       stream = null;
@@ -1100,6 +1176,7 @@
   let qrBridgeRaf = null;
 
   function closeQrBridge() {
+    releaseWakeLock('qrbridge');
     if (qrBridgeRaf) { cancelAnimationFrame(qrBridgeRaf); qrBridgeRaf = null; }
     if (qrBridgeStream) {
       qrBridgeStream.getTracks().forEach((t) => t.stop());
@@ -1119,6 +1196,8 @@
     qrBridgeModal.hidden = false;
     qrBridgeShowWrap.hidden = false;
     qrBridgeScanWrap.hidden = true;
+    // 相手が読み取るまでこのQRを出しっぱなしにするので、その間も寝かせない
+    requestWakeLock('qrbridge');
     qrBridgeStatus.textContent = '送信端末にこのQRを読み取ってもらってください';
     try {
       drawQrToCanvas(qrBridgeCanvas, `${MISSING_QR_TAG}|${txt}`, {
@@ -1154,6 +1233,7 @@
     qrBridgeModal.hidden = false;
     qrBridgeScanWrap.hidden = false;
     qrBridgeShowWrap.hidden = true;
+    requestWakeLock('qrbridge');
     qrBridgeStatus.textContent = 'カメラを起動しています…';
     try {
       qrBridgeStream = await requestQrBridgeCamera();
