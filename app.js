@@ -8,6 +8,9 @@
   const PROTOCOL_TAG = 'QRT2';
   const MISSING_QR_TAG = 'QRTM'; // missing-range side-channel, distinct from data frames
   const STORAGE_KEY = 'qrtt.settings.v1';
+  // フッタに出す最終更新日。ビルド工程が無い（index.html を直接開ける）ので
+  // 自動埋め込みができない。内容を変更したらここも更新すること。
+  const LAST_UPDATED = '2026-08-28';
   const LARGE_TRANSFER_BYTES = 2 * 1024 * 1024; // 2 MB confirm threshold
 
   const DEFAULT_SETTINGS = {
@@ -20,7 +23,7 @@
     facing: 'environment',
     resolution: 640,
     inversion: 'dontInvert',
-    imgCompress: 'medium',
+    imgCompress: '50',
   };
 
   // ----------------------------------------------------------------------
@@ -106,16 +109,28 @@
     margin: $('outMargin'),
   };
   const btnResetSettings = $('btnResetSettings');
+  const lastUpdated = $('lastUpdated');
 
   // ----------------------------------------------------------------------
   // Settings: load / save / bind
   // ----------------------------------------------------------------------
 
+  // 画像設定は「大/中/小」の絶対px指定から縮小率に変わった。保存済みの
+  // 旧値をそのまま <select> に入れると選択なしになってしまうので読み替える。
+  const LEGACY_IMG_COMPRESS = { high: '25', medium: '50', low: '75' };
+
+  function normalizeSettings(s) {
+    const v = s.imgCompress;
+    if (LEGACY_IMG_COMPRESS[v]) s.imgCompress = LEGACY_IMG_COMPRESS[v];
+    else if (v !== 'none' && !IMG_SCALES[v]) s.imgCompress = DEFAULT_SETTINGS.imgCompress;
+    return s;
+  }
+
   function loadSettings() {
     try {
       const raw = localStorage.getItem(STORAGE_KEY);
       if (!raw) return { ...DEFAULT_SETTINGS };
-      return { ...DEFAULT_SETTINGS, ...JSON.parse(raw) };
+      return normalizeSettings({ ...DEFAULT_SETTINGS, ...JSON.parse(raw) });
     } catch {
       return { ...DEFAULT_SETTINGS };
     }
@@ -524,11 +539,10 @@
   // では数十分かかって現実的でない）。画像を選んだときだけ、縮小して再
   // エンコードしてから送れるようにする。
 
-  const IMG_COMPRESS_LEVELS = {
-    high:   { maxEdge: 800,  quality: 0.5 },
-    medium: { maxEdge: 1280, quality: 0.7 },
-    low:    { maxEdge: 2048, quality: 0.85 },
-  };
+  // 縦横それぞれに掛ける倍率。画素数はこの2乗（50% なら 1/4）になる。
+  // 画質は倍率と独立に固定する（比率だけを選ばせるための単純化）。
+  const IMG_SCALES = { '75': 0.75, '50': 0.5, '25': 0.25 };
+  const IMG_QUALITY = 0.8;
 
   // WebP は透過を保てて JPEG より小さいが、canvas から書き出せない環境が
   // ある。1x1 を実際にエンコードして一度だけ判定する。
@@ -581,13 +595,15 @@
   }
 
   async function compressImage(file, level) {
-    const preset = IMG_COMPRESS_LEVELS[level];
-    if (!preset) return null;
+    const scale = IMG_SCALES[level];
+    if (!scale) return null;
 
     const src = await decodeImage(file);
-    const scale = Math.min(1, preset.maxEdge / Math.max(src.width, src.height));
-    const w = Math.max(1, Math.round(src.width * scale));
-    const h = Math.max(1, Math.round(src.height * scale));
+    // close() 後は ImageBitmap の width/height が 0 になるので先に控える
+    const srcWidth = src.width;
+    const srcHeight = src.height;
+    const w = Math.max(1, Math.round(srcWidth * scale));
+    const h = Math.max(1, Math.round(srcHeight * scale));
 
     const canvas = document.createElement('canvas');
     canvas.width = w;
@@ -603,13 +619,15 @@
     ctx.drawImage(src, 0, 0, w, h);
     if (typeof src.close === 'function') src.close();
 
-    const blob = await canvasToBlob(canvas, mime, preset.quality);
+    const blob = await canvasToBlob(canvas, mime, IMG_QUALITY);
     return {
       bytes: new Uint8Array(await blob.arrayBuffer()),
       mime,
       name: replaceExt(file.name, mime === 'image/webp' ? 'webp' : 'jpg'),
       width: w,
       height: h,
+      srcWidth,
+      srcHeight,
     };
   }
 
@@ -623,7 +641,7 @@
   }
 
   async function prepareSendFile(file, level) {
-    if (!isImageFile(file) || !IMG_COMPRESS_LEVELS[level]) return null;
+    if (!isImageFile(file) || !IMG_SCALES[level]) return null;
     if (imgPrepCached(file, level)) return imgPrep.result;
     const result = await compressImage(file, level);
     // 元がすでに最適化済みだと逆に膨らむことがある。その場合は元を送る。
@@ -649,7 +667,7 @@
 
     const base = `${f.name} (${formatBytes(f.size)}${f.type ? ', ' + f.type : ''})`;
     const level = cfg.imgCompress.value;
-    if (!isImageFile(f) || !IMG_COMPRESS_LEVELS[level]) {
+    if (!isImageFile(f) || !IMG_SCALES[level]) {
       sendFileInfo.textContent = `${base}\n${describeEta(f.size)}`;
       return;
     }
@@ -675,8 +693,8 @@
     }
     const saved = Math.round((1 - result.bytes.length / f.size) * 100);
     sendFileInfo.textContent =
-      `${base}\n→ ${formatBytes(result.bytes.length)}（-${saved}%, ${result.width}×${result.height}, ${result.mime}）`
-      + `\n${describeEta(result.bytes.length)}`;
+      `${base}\n${result.srcWidth}×${result.srcHeight} → ${result.width}×${result.height}（${level}%）`
+      + `\n→ ${formatBytes(result.bytes.length)}（-${saved}%, ${result.mime}）｜ ${describeEta(result.bytes.length)}`;
   }
 
   // ----------------------------------------------------------------------
@@ -1471,6 +1489,7 @@
     applySettingsToInputs(loadSettings());
     bindSettings();
     applySendMode(currentSendMode());
+    lastUpdated.textContent = LAST_UPDATED;
     refreshSendFileInfo();
     resetRecvState();
     if (!isSecureCameraContext()) httpsWarn.hidden = false;
