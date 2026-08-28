@@ -43,14 +43,14 @@
         </label>
 
         <label class="field" id="imgCompressField" hidden>
-          <span class="field-label">画像の圧縮</span>
+          <span class="field-label">画像の縮小</span>
           <select id="cfgImgCompress">
-            <option value="high">大（長辺 800px・最も小さい）</option>
-            <option value="medium" selected>中（長辺 1280px）</option>
-            <option value="low">小（長辺 2048px・高画質）</option>
+            <option value="75">75%（縦横をそれぞれ 75% に）</option>
+            <option value="50" selected>50%（縦横をそれぞれ 50% に）</option>
+            <option value="25">25%（縦横をそれぞれ 25% に）</option>
             <option value="none">無（元のまま送る）</option>
           </select>
-          <small class="hint">QR転送は容量がそのまま所要時間になります。画像は縮小・再エンコードしてから送れます。</small>
+          <small class="hint">QR転送は容量がそのまま所要時間になります。指定するのは縦横それぞれの比率で、画素数は 75%→約56%、50%→25%、25%→約6% になります。</small>
         </label>
       </div>
 
@@ -96,14 +96,6 @@
       <div class="video-wrap">
         <video id="cam" playsinline muted autoplay></video>
         <canvas id="scanCanvas" hidden></canvas>
-        <div class="scan-frame" aria-hidden="true">
-          <div class="scan-frame-box">
-            <span class="corner tl"></span>
-            <span class="corner tr"></span>
-            <span class="corner bl"></span>
-            <span class="corner br"></span>
-          </div>
-        </div>
       </div>
       <div class="recv-status">
         <progress id="recvProgress" value="0" max="1"></progress>
@@ -227,7 +219,8 @@
       <a href="vendor/jsQR.js">jsQR</a> (Apache-2.0) /
       <a href="vendor/fflate.min.js">fflate</a> (MIT)。GitHub リポジトリ取得時のみ
       <code>api.github.com</code> と <code>raw.githubusercontent.com</code> に通信します。<br>
-      QRコードは株式会社デンソーウェーブの登録商標です。
+      QRコードは株式会社デンソーウェーブの登録商標です。<br>
+      最終更新: <span id="lastUpdated">—</span>
     </small>
   </footer>
 
