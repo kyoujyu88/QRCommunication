@@ -484,3 +484,7 @@ code {
   text-align: center;
   margin: 0 0 8px;
 }
+
+#sendFileInfo {
+  white-space: pre-line;
+}

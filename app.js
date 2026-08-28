@@ -20,6 +20,7 @@
     facing: 'environment',
     resolution: 640,
     inversion: 'dontInvert',
+    imgCompress: 'medium',
   };
 
   // ----------------------------------------------------------------------
@@ -95,7 +96,9 @@
     facing: $('cfgFacing'),
     resolution: $('cfgResolution'),
     inversion: $('cfgInversion'),
+    imgCompress: $('cfgImgCompress'),
   };
+  const imgCompressField = $('imgCompressField');
   const out = {
     chunkSize: $('outChunkSize'),
     fps: $('outFps'),
@@ -144,6 +147,7 @@
       facing: cfg.facing.value,
       resolution: +cfg.resolution.value,
       inversion: cfg.inversion.value,
+      imgCompress: cfg.imgCompress.value,
     };
   }
 
@@ -157,6 +161,7 @@
     cfg.facing.value = s.facing;
     cfg.resolution.value = s.resolution;
     cfg.inversion.value = s.inversion;
+    cfg.imgCompress.value = s.imgCompress;
     updateOutputs();
   }
 
@@ -172,11 +177,13 @@
       el.addEventListener('input', () => {
         updateOutputs();
         saveSettings(settingsFromInputs());
+        refreshSendFileInfo();
       });
     });
     btnResetSettings.addEventListener('click', () => {
       applySettingsToInputs(DEFAULT_SETTINGS);
       saveSettings(DEFAULT_SETTINGS);
+      refreshSendFileInfo();
     });
   }
 
@@ -220,12 +227,8 @@
     b.addEventListener('click', () => applySendMode(b.dataset.mode));
   }
 
-  sendFile.addEventListener('change', () => {
-    const f = sendFile.files && sendFile.files[0];
-    sendFileInfo.textContent = f
-      ? `${f.name} (${formatBytes(f.size)}${f.type ? ', ' + f.type : ''})`
-      : 'ファイル未選択';
-  });
+  sendFile.addEventListener('change', refreshSendFileInfo);
+  cfg.imgCompress.addEventListener('change', refreshSendFileInfo);
 
   // Accepts:
   //   https://github.com/owner/repo[.git][/tree/<ref>[/...]]
@@ -515,6 +518,168 @@
   }
 
   // ----------------------------------------------------------------------
+  // Image compression (send side)
+  // ----------------------------------------------------------------------
+  // QR転送は容量がそのまま所要時間になる（スマホの写真は数MBあり、既定設定
+  // では数十分かかって現実的でない）。画像を選んだときだけ、縮小して再
+  // エンコードしてから送れるようにする。
+
+  const IMG_COMPRESS_LEVELS = {
+    high:   { maxEdge: 800,  quality: 0.5 },
+    medium: { maxEdge: 1280, quality: 0.7 },
+    low:    { maxEdge: 2048, quality: 0.85 },
+  };
+
+  // WebP は透過を保てて JPEG より小さいが、canvas から書き出せない環境が
+  // ある。1x1 を実際にエンコードして一度だけ判定する。
+  let webpEncodable = null;
+  function canEncodeWebp() {
+    if (webpEncodable === null) {
+      const c = document.createElement('canvas');
+      c.width = 1;
+      c.height = 1;
+      webpEncodable = c.toDataURL('image/webp').startsWith('data:image/webp');
+    }
+    return webpEncodable;
+  }
+
+  function isImageFile(f) {
+    return !!f && /^image\//i.test(f.type || '');
+  }
+
+  function replaceExt(name, ext) {
+    const base = String(name || '').replace(/\.[^./\\]+$/, '');
+    return `${base || 'image'}.${ext}`;
+  }
+
+  // EXIF の向きは createImageBitmap / <img> のどちらでも反映される。
+  async function decodeImage(file) {
+    if (typeof createImageBitmap === 'function') {
+      try {
+        return await createImageBitmap(file, { imageOrientation: 'from-image' });
+      } catch (_) { /* オプション非対応などは <img> に落とす */ }
+    }
+    const url = URL.createObjectURL(file);
+    try {
+      const img = new Image();
+      img.src = url;
+      await img.decode();
+      return img;
+    } finally {
+      URL.revokeObjectURL(url);
+    }
+  }
+
+  function canvasToBlob(canvas, mime, quality) {
+    return new Promise((resolve, reject) => {
+      canvas.toBlob(
+        (b) => (b ? resolve(b) : reject(new Error('エンコードに失敗しました'))),
+        mime,
+        quality,
+      );
+    });
+  }
+
+  async function compressImage(file, level) {
+    const preset = IMG_COMPRESS_LEVELS[level];
+    if (!preset) return null;
+
+    const src = await decodeImage(file);
+    const scale = Math.min(1, preset.maxEdge / Math.max(src.width, src.height));
+    const w = Math.max(1, Math.round(src.width * scale));
+    const h = Math.max(1, Math.round(src.height * scale));
+
+    const canvas = document.createElement('canvas');
+    canvas.width = w;
+    canvas.height = h;
+    const ctx = canvas.getContext('2d');
+    const mime = canEncodeWebp() ? 'image/webp' : 'image/jpeg';
+    // JPEG は透過を持てないので、抜けが黒くならないよう白で敷いておく
+    if (mime === 'image/jpeg') {
+      ctx.fillStyle = '#fff';
+      ctx.fillRect(0, 0, w, h);
+    }
+    ctx.imageSmoothingQuality = 'high';
+    ctx.drawImage(src, 0, 0, w, h);
+    if (typeof src.close === 'function') src.close();
+
+    const blob = await canvasToBlob(canvas, mime, preset.quality);
+    return {
+      bytes: new Uint8Array(await blob.arrayBuffer()),
+      mime,
+      name: replaceExt(file.name, mime === 'image/webp' ? 'webp' : 'jpg'),
+      width: w,
+      height: h,
+    };
+  }
+
+  // 直近の圧縮結果。プレビュー表示と実送信で二度焼きしないためのキャッシュ。
+  // result が null なら「元のまま送る」（非画像・圧縮無・縮まらなかった場合）。
+  let imgPrep = null;   // { file, level, result }
+  let imgPrepSeq = 0;
+
+  function imgPrepCached(file, level) {
+    return !!imgPrep && imgPrep.file === file && imgPrep.level === level;
+  }
+
+  async function prepareSendFile(file, level) {
+    if (!isImageFile(file) || !IMG_COMPRESS_LEVELS[level]) return null;
+    if (imgPrepCached(file, level)) return imgPrep.result;
+    const result = await compressImage(file, level);
+    // 元がすでに最適化済みだと逆に膨らむことがある。その場合は元を送る。
+    const usable = result && result.bytes.length < file.size ? result : null;
+    imgPrep = { file, level, result: usable };
+    return usable;
+  }
+
+  function describeEta(bytes) {
+    const s = settingsFromInputs();
+    return `推定 ${formatDuration(estimateSeconds(bytes, s.chunkSize, s.fps))}`;
+  }
+
+  // ファイル情報行の再描画。圧縮後のサイズと推定転送時間まで出すことで、
+  // 「送り始めてから終わらないと気づく」のを防ぐ。
+  async function refreshSendFileInfo() {
+    const f = sendFile.files && sendFile.files[0];
+    imgCompressField.hidden = !isImageFile(f);
+    if (!f) {
+      sendFileInfo.textContent = 'ファイル未選択';
+      return;
+    }
+
+    const base = `${f.name} (${formatBytes(f.size)}${f.type ? ', ' + f.type : ''})`;
+    const level = cfg.imgCompress.value;
+    if (!isImageFile(f) || !IMG_COMPRESS_LEVELS[level]) {
+      sendFileInfo.textContent = `${base}\n${describeEta(f.size)}`;
+      return;
+    }
+
+    const seq = ++imgPrepSeq;
+    if (!imgPrepCached(f, level)) sendFileInfo.textContent = `${base}\n圧縮中…`;
+
+    let result;
+    try {
+      result = await prepareSendFile(f, level);
+    } catch (err) {
+      if (seq !== imgPrepSeq) return;
+      sendFileInfo.textContent =
+        `${base}\n圧縮できなかったため元のまま送信します（${err.message}）\n${describeEta(f.size)}`;
+      return;
+    }
+    if (seq !== imgPrepSeq) return;   // 待っている間に選択が変わった
+
+    if (!result) {
+      sendFileInfo.textContent =
+        `${base}\n圧縮しても小さくならないため元のまま送信します\n${describeEta(f.size)}`;
+      return;
+    }
+    const saved = Math.round((1 - result.bytes.length / f.size) * 100);
+    sendFileInfo.textContent =
+      `${base}\n→ ${formatBytes(result.bytes.length)}（-${saved}%, ${result.width}×${result.height}, ${result.mime}）`
+      + `\n${describeEta(result.bytes.length)}`;
+  }
+
+  // ----------------------------------------------------------------------
   // Send data gathering (per mode)
   // ----------------------------------------------------------------------
 
@@ -530,6 +695,16 @@
     if (mode === 'file') {
       const f = sendFile.files && sendFile.files[0];
       if (!f) throw new Error('ファイルを選択してください');
+      let compressed = null;
+      try {
+        compressed = await prepareSendFile(f, cfg.imgCompress.value);
+      } catch (_) { /* 圧縮できなければ元のまま送る */ }
+      if (compressed) {
+        return {
+          manifest: { kind: 'file', name: compressed.name, mime: compressed.mime },
+          body: compressed.bytes,
+        };
+      }
       const buf = await f.arrayBuffer();
       return {
         manifest: {
@@ -879,6 +1054,7 @@
   function setSendInputsDisabled(disabled) {
     sendInput.disabled = disabled;
     sendFile.disabled = disabled;
+    cfg.imgCompress.disabled = disabled;
     sendRepoUrl.disabled = disabled;
     for (const b of modeButtons) b.disabled = disabled;
   }
@@ -1295,6 +1471,7 @@
     applySettingsToInputs(loadSettings());
     bindSettings();
     applySendMode(currentSendMode());
+    refreshSendFileInfo();
     resetRecvState();
     if (!isSecureCameraContext()) httpsWarn.hidden = false;
   }
