@@ -41,6 +41,17 @@
           <input id="sendFile" type="file">
           <div id="sendFileInfo" class="hint">ファイル未選択</div>
         </label>
+
+        <label class="field" id="imgCompressField" hidden>
+          <span class="field-label">画像の圧縮</span>
+          <select id="cfgImgCompress">
+            <option value="high">大（長辺 800px・最も小さい）</option>
+            <option value="medium" selected>中（長辺 1280px）</option>
+            <option value="low">小（長辺 2048px・高画質）</option>
+            <option value="none">無（元のまま送る）</option>
+          </select>
+          <small class="hint">QR転送は容量がそのまま所要時間になります。画像は縮小・再エンコードしてから送れます。</small>
+        </label>
       </div>
 
       <div data-mode-panel="repo" class="mode-panel" hidden>
