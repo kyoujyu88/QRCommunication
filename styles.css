@@ -459,3 +459,42 @@ code {
 #sendFileInfo {
   white-space: pre-line;
 }
+
+.repo-picker-tools {
+  gap: 6px;
+  margin-bottom: 6px;
+}
+
+.repo-file-list {
+  max-height: 260px;
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 4px;
+}
+
+.repo-file-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 2px 6px;
+  font-size: 0.82rem;
+  line-height: 1.5;
+}
+.repo-file-row:hover {
+  background: rgba(127, 127, 127, 0.12);
+}
+.repo-file-row input {
+  flex: 0 0 auto;
+  margin: 0;
+}
+.repo-file-path {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.repo-file-size {
+  flex: 0 0 auto;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}

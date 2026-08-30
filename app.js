@@ -10,7 +10,7 @@
   const STORAGE_KEY = 'qrtt.settings.v1';
   // フッタに出す最終更新日。ビルド工程が無い（index.html を直接開ける）ので
   // 自動埋め込みができない。内容を変更したらここも更新すること。
-  const LAST_UPDATED = '2026-08-28';
+  const LAST_UPDATED = '2026-08-30';
   const LARGE_TRANSFER_BYTES = 2 * 1024 * 1024; // 2 MB confirm threshold
 
   const DEFAULT_SETTINGS = {
@@ -56,6 +56,14 @@
   const qrCanvas = $('qrCanvas');
   const sendRange = $('sendRange');
   const btnRangeApply = $('btnRangeApply');
+  const btnRepoLoad = $('btnRepoLoad');
+  const repoTreeStatus = $('repoTreeStatus');
+  const repoPicker = $('repoPicker');
+  const repoFilter = $('repoFilter');
+  const btnRepoAll = $('btnRepoAll');
+  const btnRepoNone = $('btnRepoNone');
+  const repoFileList = $('repoFileList');
+  const repoSelSummary = $('repoSelSummary');
   const modeButtons = document.querySelectorAll('.mode-opt');
   const modePanels = document.querySelectorAll('[data-mode-panel]');
 
@@ -193,6 +201,7 @@
         updateOutputs();
         saveSettings(settingsFromInputs());
         refreshSendFileInfo();
+        updateRepoSummary();
       });
     });
     btnResetSettings.addEventListener('click', () => {
@@ -241,6 +250,12 @@
   for (const b of modeButtons) {
     b.addEventListener('click', () => applySendMode(b.dataset.mode));
   }
+
+  sendRepoUrl.addEventListener('input', () => {
+    if (repoTree && !repoTreeMatches(parseRepoSpec(sendRepoUrl.value))) {
+      clearRepoTree('リポジトリが変わりました。もう一度「ファイル一覧を取得」してください');
+    }
+  });
 
   sendFile.addEventListener('change', refreshSendFileInfo);
   cfg.imgCompress.addEventListener('change', refreshSendFileInfo);
@@ -458,50 +473,76 @@
   // both serve Access-Control-Allow-Origin: *)
   // ----------------------------------------------------------------------
 
-  async function fetchRepoAsZip(spec, onProgress) {
+  async function resolveRepoRef(spec, onP) {
+    if (spec.ref) return spec.ref;
+    onP(`デフォルトブランチを確認中: ${spec.owner}/${spec.repo}…`);
+    const info = await ghJson(`repos/${spec.owner}/${spec.repo}`);
+    if (!info.default_branch) throw new Error('default_branch を取得できませんでした');
+    return info.default_branch;
+  }
+
+  // ツリーだけ取る。blob には size が入っているので、ダウンロード前に
+  // 「どれを送るとどれくらいかかるか」を出せる。
+  async function fetchRepoTree(spec, onProgress) {
     const onP = onProgress || (() => {});
     const { owner, repo } = spec;
-    let ref = spec.ref;
-
-    if (!ref) {
-      onP(`デフォルトブランチを確認中: ${owner}/${repo}…`);
-      const info = await ghJson(`repos/${owner}/${repo}`);
-      ref = info.default_branch;
-      if (!ref) throw new Error('default_branch を取得できませんでした');
-    }
+    const ref = await resolveRepoRef(spec, onP);
 
     onP(`ツリー取得中: ${owner}/${repo}@${ref}…`);
     const tree = await ghJson(`repos/${owner}/${repo}/git/trees/${encodeURIComponent(ref)}?recursive=1`);
     if (!tree || !Array.isArray(tree.tree)) throw new Error('tree レスポンスが不正');
-    const blobs = tree.tree.filter((e) => e.type === 'blob');
-    if (tree.truncated) {
-      onP(`⚠ ツリーが大きすぎて切り詰められました (${blobs.length}件)。一部のみ取得します`);
-    }
-    if (blobs.length === 0) throw new Error('対象ファイルが見つかりません');
+    const entries = tree.tree
+      .filter((e) => e.type === 'blob')
+      .map((e) => ({ path: e.path, size: typeof e.size === 'number' ? e.size : 0 }));
+    if (entries.length === 0) throw new Error('対象ファイルが見つかりません');
+    return { owner, repo, ref, entries, truncated: !!tree.truncated };
+  }
 
-    const fetched = new Array(blobs.length);
+  async function downloadRepoFiles(owner, repo, ref, entries, onP) {
+    const fetched = new Array(entries.length);
     let done = 0;
     const CONCURRENCY = 8;
     let next = 0;
     async function worker() {
       while (true) {
         const i = next++;
-        if (i >= blobs.length) return;
-        const entry = blobs[i];
+        if (i >= entries.length) return;
+        const entry = entries[i];
         const url = `https://raw.githubusercontent.com/${owner}/${repo}/${encodeURIComponent(ref)}/${entry.path.split('/').map(encodeURIComponent).join('/')}`;
         const res = await fetch(url);
         if (!res.ok) throw new Error(`${entry.path}: HTTP ${res.status}`);
         const buf = await res.arrayBuffer();
         fetched[i] = { path: entry.path, bytes: new Uint8Array(buf) };
         done++;
-        if (done % 5 === 0 || done === blobs.length) {
-          onP(`ファイル取得中: ${done} / ${blobs.length} (${owner}/${repo}@${ref})`);
+        if (done % 5 === 0 || done === entries.length) {
+          onP(`ファイル取得中: ${done} / ${entries.length} (${owner}/${repo}@${ref})`);
         }
       }
     }
-    await Promise.all(Array.from({ length: Math.min(CONCURRENCY, blobs.length) }, worker));
+    await Promise.all(Array.from({ length: Math.min(CONCURRENCY, entries.length) }, worker));
+    return fetched;
+  }
 
-    onP(`zip 生成中 (${blobs.length}件)…`);
+  // entries は送る対象だけに絞り込んだもの。未指定ならツリー全件を送る。
+  async function fetchRepoAsZip(spec, onProgress, entries) {
+    const onP = onProgress || (() => {});
+    let owner, repo, ref, list;
+    if (entries) {
+      ({ owner, repo, ref } = spec);
+      list = entries;
+    } else {
+      const tree = await fetchRepoTree(spec, onP);
+      ({ owner, repo, ref } = tree);
+      list = tree.entries;
+      if (tree.truncated) {
+        onP(`⚠ ツリーが大きすぎて切り詰められました (${list.length}件)。一部のみ取得します`);
+      }
+    }
+    if (list.length === 0) throw new Error('送信するファイルが選択されていません');
+
+    const fetched = await downloadRepoFiles(owner, repo, ref, list, onP);
+
+    onP(`zip 生成中 (${list.length}件)…`);
     const refSafe = ref.replace(/[^\w.-]/g, '_');
     const rootDir = `${owner}-${repo}-${refSafe}/`;
     const files = {};
@@ -531,6 +572,131 @@
     }
     return res.json();
   }
+
+  // ----------------------------------------------------------------------
+  // Repo file picker
+  // ----------------------------------------------------------------------
+  // リポジトリ全体を送ると転送が現実的な時間で終わらないことが多い。ツリー
+  // だけ先に取れば各 blob の size が分かるので、ダウンロード前に「何を送ると
+  // 何分かかるか」を見ながら選べるようにする。一覧未取得のまま開始した場合は従来どおり
+  // 全ファイルを送る。
+
+  const REPO_ROW_CAP = 1000;   // DOM が重くなるので描画は打ち切る（絞り込みで対応）
+
+  let repoTree = null;              // fetchRepoTree の結果
+  let repoSelected = new Set();     // 選択中のパス
+
+  function repoTreeMatches(spec) {
+    return !!repoTree && !!spec
+      && repoTree.owner === spec.owner && repoTree.repo === spec.repo
+      && (!spec.ref || repoTree.ref === spec.ref);
+  }
+
+  function clearRepoTree(reason) {
+    repoTree = null;
+    repoSelected = new Set();
+    repoPicker.hidden = true;
+    repoFileList.textContent = '';
+    repoTreeStatus.textContent = reason || '未取得（そのまま開始すると全ファイルを送ります）';
+  }
+
+  function filteredRepoEntries() {
+    const q = repoFilter.value.trim().toLowerCase();
+    const all = repoTree ? repoTree.entries : [];
+    return q ? all.filter((e) => e.path.toLowerCase().includes(q)) : all;
+  }
+
+  function selectedRepoEntries() {
+    if (!repoTree) return [];
+    return repoTree.entries.filter((e) => repoSelected.has(e.path));
+  }
+
+  function updateRepoSummary() {
+    if (!repoTree) return;
+    const sel = selectedRepoEntries();
+    const bytes = sel.reduce((n, e) => n + e.size, 0);
+    if (sel.length === 0) {
+      repoSelSummary.textContent = '選択なし（このままでは送信できません）';
+      return;
+    }
+    const s = settingsFromInputs();
+    const eta = formatDuration(estimateSeconds(bytes, s.chunkSize, s.fps));
+    // zip 前の合計なので実際の転送量はこれより小さくなる。上限として示す。
+    repoSelSummary.textContent =
+      `選択 ${sel.length} / ${repoTree.entries.length} 件 ｜ 圧縮前 ${formatBytes(bytes)}`
+      + ` ｜ 推定 最大 ${eta}（zip 後は縮むため実際はこれより短くなります）`;
+  }
+
+  function renderRepoFileList() {
+    if (!repoTree) return;
+    const rows = filteredRepoEntries();
+    const frag = document.createDocumentFragment();
+    for (const e of rows.slice(0, REPO_ROW_CAP)) {
+      const row = document.createElement('label');
+      row.className = 'repo-file-row';
+      const cb = document.createElement('input');
+      cb.type = 'checkbox';
+      cb.checked = repoSelected.has(e.path);
+      cb.addEventListener('change', () => {
+        if (cb.checked) repoSelected.add(e.path);
+        else repoSelected.delete(e.path);
+        updateRepoSummary();
+      });
+      const path = document.createElement('span');
+      path.className = 'repo-file-path';
+      path.textContent = e.path;
+      const size = document.createElement('span');
+      size.className = 'repo-file-size';
+      size.textContent = formatBytes(e.size);
+      row.append(cb, path, size);
+      frag.appendChild(row);
+    }
+    repoFileList.textContent = '';
+    repoFileList.appendChild(frag);
+    if (rows.length > REPO_ROW_CAP) {
+      const more = document.createElement('div');
+      more.className = 'hint';
+      more.textContent = `他 ${rows.length - REPO_ROW_CAP} 件は表示していません（絞り込んでください）`;
+      repoFileList.appendChild(more);
+    }
+    updateRepoSummary();
+  }
+
+  async function loadRepoTree() {
+    const spec = parseRepoSpec(sendRepoUrl.value);
+    if (!spec) {
+      repoTreeStatus.textContent = 'GitHub URL または owner/repo[@ref] を入力してください';
+      return;
+    }
+    btnRepoLoad.disabled = true;
+    repoTreeStatus.textContent = '取得中…';
+    try {
+      repoTree = await fetchRepoTree(spec, (msg) => { repoTreeStatus.textContent = msg; });
+    } catch (err) {
+      clearRepoTree(`取得失敗: ${err.message}`);
+      return;
+    } finally {
+      btnRepoLoad.disabled = false;
+    }
+    repoSelected = new Set(repoTree.entries.map((e) => e.path));   // 既定は全選択
+    repoFilter.value = '';
+    repoPicker.hidden = false;
+    repoTreeStatus.textContent = repoTree.truncated
+      ? `⚠ ${repoTree.owner}/${repoTree.repo}@${repoTree.ref}: ツリーが大きすぎて切り詰められています（一部のみ）`
+      : `${repoTree.owner}/${repoTree.repo}@${repoTree.ref}`;
+    renderRepoFileList();
+  }
+
+  btnRepoLoad.addEventListener('click', loadRepoTree);
+  repoFilter.addEventListener('input', renderRepoFileList);
+  btnRepoAll.addEventListener('click', () => {
+    for (const e of filteredRepoEntries()) repoSelected.add(e.path);
+    renderRepoFileList();
+  });
+  btnRepoNone.addEventListener('click', () => {
+    for (const e of filteredRepoEntries()) repoSelected.delete(e.path);
+    renderRepoFileList();
+  });
 
   // ----------------------------------------------------------------------
   // Image compression (send side)
@@ -736,9 +902,18 @@
     if (mode === 'repo') {
       const spec = parseRepoSpec(sendRepoUrl.value);
       if (!spec) throw new Error('GitHub URL または owner/repo[@ref] を入力してください');
-      const { body, manifest } = await fetchRepoAsZip(spec, (msg) => {
-        sendStatus.textContent = msg;
-      });
+      // 一覧を取得済みで、それが今のURLと一致していれば選択分だけを送る。
+      // 未取得なら従来どおり全ファイル（fetchRepoAsZip が自分でツリーを取る）。
+      let picked;
+      if (repoTreeMatches(spec)) {
+        picked = selectedRepoEntries();
+        if (picked.length === 0) throw new Error('送信するファイルが選択されていません');
+      }
+      const { body, manifest } = await fetchRepoAsZip(
+        picked ? { owner: repoTree.owner, repo: repoTree.repo, ref: repoTree.ref } : spec,
+        (msg) => { sendStatus.textContent = msg; },
+        picked,
+      );
       return { manifest, body };
     }
     throw new Error(`不明なモード: ${mode}`);
@@ -1074,6 +1249,11 @@
     sendFile.disabled = disabled;
     cfg.imgCompress.disabled = disabled;
     sendRepoUrl.disabled = disabled;
+    btnRepoLoad.disabled = disabled;
+    repoFilter.disabled = disabled;
+    btnRepoAll.disabled = disabled;
+    btnRepoNone.disabled = disabled;
+    for (const cb of repoFileList.querySelectorAll('input')) cb.disabled = disabled;
     for (const b of modeButtons) b.disabled = disabled;
   }
 
