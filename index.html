@@ -60,7 +60,24 @@
           <input id="sendRepoUrl" type="text" placeholder="https://github.com/kyoujyu88/QRCommunication" autocomplete="off" spellcheck="false">
           <small id="sendRepoParsed" class="hint">URL またはショート形式を貼り付けてください</small>
         </label>
-        <p class="hint">「QR表示開始」を押すと <code>api.github.com</code> から zipball を取得して送信を開始します。公開リポジトリのみ。</p>
+        <div class="row">
+          <button id="btnRepoLoad" class="btn btn-sm">ファイル一覧を取得</button>
+          <span id="repoTreeStatus" class="status">未取得（そのまま開始すると全ファイルを送ります）</span>
+        </div>
+
+        <div id="repoPicker" hidden>
+          <div class="row repo-picker-tools">
+            <input id="repoFilter" type="text" class="range-input"
+                   placeholder="パスで絞り込み（例: src/ や .md）"
+                   autocomplete="off" spellcheck="false">
+            <button id="btnRepoAll" class="btn btn-sm">表示中を選択</button>
+            <button id="btnRepoNone" class="btn btn-sm">表示中を解除</button>
+          </div>
+          <div id="repoFileList" class="repo-file-list"></div>
+          <div id="repoSelSummary" class="hint">—</div>
+        </div>
+
+        <p class="hint">「QR表示開始」を押すと <code>api.github.com</code> からファイルを取得し、zip にまとめて送信します。公開リポジトリのみ。</p>
       </div>
 
       <div class="row">
