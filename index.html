@@ -37,10 +37,14 @@
 
       <div data-mode-panel="file" class="mode-panel" hidden>
         <label class="field">
-          <span class="field-label">送信ファイル</span>
-          <input id="sendFile" type="file">
-          <div id="sendFileInfo" class="hint">ファイル未選択</div>
+          <span class="field-label">送信ファイル（複数選択できます）</span>
+          <input id="sendFile" type="file" multiple>
         </label>
+        <div id="sendFileList" class="send-file-list" hidden></div>
+        <div class="row" id="sendFileTools" hidden>
+          <button id="btnSendFilesClear" class="btn btn-sm">すべて解除</button>
+        </div>
+        <div id="sendFileInfo" class="hint">ファイル未選択</div>
 
         <label class="field" id="imgCompressField" hidden>
           <span class="field-label">画像の縮小</span>
