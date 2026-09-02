@@ -10,7 +10,7 @@
   const STORAGE_KEY = 'qrtt.settings.v1';
   // フッタに出す最終更新日。ビルド工程が無い（index.html を直接開ける）ので
   // 自動埋め込みができない。内容を変更したらここも更新すること。
-  const LAST_UPDATED = '2026-08-30';
+  const LAST_UPDATED = '2026-09-02';
   const LARGE_TRANSFER_BYTES = 2 * 1024 * 1024; // 2 MB confirm threshold
 
   const DEFAULT_SETTINGS = {
@@ -46,6 +46,9 @@
   const sendInput = $('sendInput');
   const sendFile = $('sendFile');
   const sendFileInfo = $('sendFileInfo');
+  const sendFileList = $('sendFileList');
+  const sendFileTools = $('sendFileTools');
+  const btnSendFilesClear = $('btnSendFilesClear');
   const sendRepoUrl = $('sendRepoUrl');
   const sendRepoParsed = $('sendRepoParsed');
   const btnSendStart = $('btnSendStart');
@@ -257,7 +260,16 @@
     }
   });
 
-  sendFile.addEventListener('change', refreshSendFileInfo);
+  sendFile.addEventListener('change', () => {
+    addSendFiles(sendFile.files || []);
+    sendFile.value = '';   // 同じファイルを外して選び直せるようにする
+    refreshSendFileInfo();
+  });
+  btnSendFilesClear.addEventListener('click', () => {
+    sendFiles = [];
+    imgPrepCache.clear();
+    refreshSendFileInfo();
+  });
   cfg.imgCompress.addEventListener('change', refreshSendFileInfo);
 
   // Accepts:
@@ -797,22 +809,29 @@
     };
   }
 
-  // 直近の圧縮結果。プレビュー表示と実送信で二度焼きしないためのキャッシュ。
-  // result が null なら「元のまま送る」（非画像・圧縮無・縮まらなかった場合）。
-  let imgPrep = null;   // { file, level, result }
+  // 圧縮結果を File ごとに覚えておく。プレビュー表示と実送信、さらに複数
+  // ファイル選択時の各行の描画で、同じ画像を何度もエンコードしないため。
+  // result が null なら「元のまま送る」（縮まらなかった・失敗した場合）。
+  const imgPrepCache = new Map();   // File -> { level, result }
   let imgPrepSeq = 0;
 
   function imgPrepCached(file, level) {
-    return !!imgPrep && imgPrep.file === file && imgPrep.level === level;
+    const hit = imgPrepCache.get(file);
+    return !!hit && hit.level === level;
+  }
+
+  // sendFiles から外れた File のキャッシュは捨てる（File を掴み続けない）
+  function pruneImgPrepCache(keep) {
+    for (const f of imgPrepCache.keys()) if (!keep.has(f)) imgPrepCache.delete(f);
   }
 
   async function prepareSendFile(file, level) {
     if (!isImageFile(file) || !IMG_SCALES[level]) return null;
-    if (imgPrepCached(file, level)) return imgPrep.result;
+    if (imgPrepCached(file, level)) return imgPrepCache.get(file).result;
     const result = await compressImage(file, level);
     // 元がすでに最適化済みだと逆に膨らむことがある。その場合は元を送る。
     const usable = result && result.bytes.length < file.size ? result : null;
-    imgPrep = { file, level, result: usable };
+    imgPrepCache.set(file, { level, result: usable });
     return usable;
   }
 
@@ -821,46 +840,144 @@
     return `推定 ${formatDuration(estimateSeconds(bytes, s.chunkSize, s.fps))}`;
   }
 
-  // ファイル情報行の再描画。圧縮後のサイズと推定転送時間まで出すことで、
-  // 「送り始めてから終わらないと気づく」のを防ぐ。
+  // ------------------------------------------------------------------
+  // 送信ファイルの選択（複数可）
+  // ------------------------------------------------------------------
+  // input.files は読み取り専用で1件だけ外すことができないため、選択状態は
+  // こちらの配列を正とし、input は「追加する」ためだけに使う。2件以上に
+  // なったら zip にまとめて1つのデータとして送る。
+
+  let sendFiles = [];
+
+  const fileKey = (f) => `${f.name}|${f.size}|${f.lastModified}`;
+
+  function addSendFiles(list) {
+    const seen = new Set(sendFiles.map(fileKey));
+    for (const f of list) {
+      if (seen.has(fileKey(f))) continue;   // 同じファイルの二重追加を防ぐ
+      seen.add(fileKey(f));
+      sendFiles.push(f);
+    }
+    pruneImgPrepCache(new Set(sendFiles));
+  }
+
+  // zip 内でファイル名が衝突しないようにする（別フォルダの同名ファイルなど）
+  function uniqueZipName(name, used) {
+    if (!used.has(name)) { used.add(name); return name; }
+    const dot = name.lastIndexOf('.');
+    const stem = dot > 0 ? name.slice(0, dot) : name;
+    const ext = dot > 0 ? name.slice(dot) : '';
+    for (let i = 2; ; i++) {
+      const cand = `${stem} (${i})${ext}`;
+      if (!used.has(cand)) { used.add(cand); return cand; }
+    }
+  }
+
+  function zipBundleName() {
+    const d = new Date();
+    const p = (n) => String(n).padStart(2, '0');
+    return `files-${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}`
+      + `-${p(d.getHours())}${p(d.getMinutes())}.zip`;
+  }
+
+  // 各ファイルについて「実際に送る形」を用意する。画像は縮小後、それ以外と
+  // 縮小できなかった画像は compressed = null（元のまま送る）。
+  async function prepareAllSendFiles(level) {
+    const out = [];
+    for (const file of sendFiles) {
+      let compressed = null;
+      try {
+        compressed = await prepareSendFile(file, level);
+      } catch (_) { /* 圧縮できなければ元のまま送る */ }
+      out.push({ file, compressed });
+    }
+    return out;
+  }
+
+  const sentBytesOf = (p) => (p.compressed ? p.compressed.bytes.length : p.file.size);
+
+  function renderSendFileRows(prepared) {
+    sendFileList.textContent = '';
+    const frag = document.createDocumentFragment();
+    sendFiles.forEach((file, i) => {
+      const row = document.createElement('div');
+      row.className = 'send-file-row';
+
+      const rm = document.createElement('button');
+      rm.type = 'button';
+      rm.className = 'send-file-remove';
+      rm.textContent = '✕';
+      rm.title = 'この1件を外す';
+      rm.disabled = sendFile.disabled;
+      rm.addEventListener('click', () => {
+        sendFiles.splice(i, 1);
+        pruneImgPrepCache(new Set(sendFiles));
+        refreshSendFileInfo();
+      });
+
+      const name = document.createElement('span');
+      name.className = 'send-file-path';
+      name.textContent = file.name;
+
+      const size = document.createElement('span');
+      size.className = 'send-file-size';
+      const p = prepared && prepared[i];
+      size.textContent = p && p.compressed
+        ? `${formatBytes(file.size)} → ${formatBytes(p.compressed.bytes.length)}`
+        : formatBytes(file.size);
+
+      row.append(rm, name, size);
+      frag.appendChild(row);
+    });
+    sendFileList.appendChild(frag);
+    sendFileList.hidden = sendFiles.length === 0;
+    sendFileTools.hidden = sendFiles.length === 0;
+  }
+
+  // 送信サイズと推定転送時間まで出すことで、「送り始めてから終わらないことに
+  // 気づく」のを防ぐ。
   async function refreshSendFileInfo() {
-    const f = sendFile.files && sendFile.files[0];
-    imgCompressField.hidden = !isImageFile(f);
-    if (!f) {
+    const level = cfg.imgCompress.value;
+    imgCompressField.hidden = !sendFiles.some(isImageFile);
+
+    if (sendFiles.length === 0) {
+      renderSendFileRows(null);
       sendFileInfo.textContent = 'ファイル未選択';
       return;
     }
 
-    const base = `${f.name} (${formatBytes(f.size)}${f.type ? ', ' + f.type : ''})`;
-    const level = cfg.imgCompress.value;
-    if (!isImageFile(f) || !IMG_SCALES[level]) {
-      sendFileInfo.textContent = `${base}\n${describeEta(f.size)}`;
-      return;
-    }
-
     const seq = ++imgPrepSeq;
-    if (!imgPrepCached(f, level)) sendFileInfo.textContent = `${base}\n圧縮中…`;
+    const pending = sendFiles.some((f) => isImageFile(f) && IMG_SCALES[level] && !imgPrepCached(f, level));
+    renderSendFileRows(null);
+    if (pending) sendFileInfo.textContent = '圧縮中…';
 
-    let result;
-    try {
-      result = await prepareSendFile(f, level);
-    } catch (err) {
-      if (seq !== imgPrepSeq) return;
-      sendFileInfo.textContent =
-        `${base}\n圧縮できなかったため元のまま送信します（${err.message}）\n${describeEta(f.size)}`;
-      return;
-    }
+    const prepared = await prepareAllSendFiles(level);
     if (seq !== imgPrepSeq) return;   // 待っている間に選択が変わった
+    renderSendFileRows(prepared);
 
-    if (!result) {
+    const total = prepared.reduce((n, p) => n + sentBytesOf(p), 0);
+
+    if (prepared.length === 1) {
+      const { file, compressed } = prepared[0];
+      const head = `${file.name}（${formatBytes(file.size)}${file.type ? ', ' + file.type : ''}）`;
+      if (!compressed) {
+        sendFileInfo.textContent = `${head}\n${describeEta(total)}`;
+        return;
+      }
+      const saved = Math.round((1 - compressed.bytes.length / file.size) * 100);
       sendFileInfo.textContent =
-        `${base}\n圧縮しても小さくならないため元のまま送信します\n${describeEta(f.size)}`;
+        `${head}\n${compressed.srcWidth}×${compressed.srcHeight} → ${compressed.width}×${compressed.height}（${level}%）`
+        + `\n→ ${formatBytes(compressed.bytes.length)}（-${saved}%, ${compressed.mime}）｜ ${describeEta(total)}`;
       return;
     }
-    const saved = Math.round((1 - result.bytes.length / f.size) * 100);
+
+    // 複数選択時は zip にまとめる。zip 後は縮むので推定は上限として示す。
+    const cfgNow = settingsFromInputs();
+    const eta = formatDuration(estimateSeconds(total, cfgNow.chunkSize, cfgNow.fps));
     sendFileInfo.textContent =
-      `${base}\n${result.srcWidth}×${result.srcHeight} → ${result.width}×${result.height}（${level}%）`
-      + `\n→ ${formatBytes(result.bytes.length)}（-${saved}%, ${result.mime}）｜ ${describeEta(result.bytes.length)}`;
+      `${prepared.length} 件を zip にまとめて送信します`
+      + `\n圧縮前 計 ${formatBytes(total)} ｜ 推定 最大 ${eta}`
+      + `（zip 後は縮むため実際はこれより短くなります）`;
   }
 
   // ----------------------------------------------------------------------
@@ -877,26 +994,39 @@
       };
     }
     if (mode === 'file') {
-      const f = sendFile.files && sendFile.files[0];
-      if (!f) throw new Error('ファイルを選択してください');
-      let compressed = null;
-      try {
-        compressed = await prepareSendFile(f, cfg.imgCompress.value);
-      } catch (_) { /* 圧縮できなければ元のまま送る */ }
-      if (compressed) {
+      if (sendFiles.length === 0) throw new Error('ファイルを選択してください');
+      const prepared = await prepareAllSendFiles(cfg.imgCompress.value);
+
+      // 1件だけなら zip で包まず、そのファイルとして送る
+      if (prepared.length === 1) {
+        const { file, compressed } = prepared[0];
+        if (compressed) {
+          return {
+            manifest: { kind: 'file', name: compressed.name, mime: compressed.mime },
+            body: compressed.bytes,
+          };
+        }
         return {
-          manifest: { kind: 'file', name: compressed.name, mime: compressed.mime },
-          body: compressed.bytes,
+          manifest: {
+            kind: 'file',
+            name: file.name,
+            mime: file.type || 'application/octet-stream',
+          },
+          body: new Uint8Array(await file.arrayBuffer()),
         };
       }
-      const buf = await f.arrayBuffer();
+
+      const used = new Set();
+      const entries = {};
+      for (const { file, compressed } of prepared) {
+        const name = uniqueZipName(compressed ? compressed.name : file.name, used);
+        entries[name] = compressed
+          ? compressed.bytes
+          : new Uint8Array(await file.arrayBuffer());
+      }
       return {
-        manifest: {
-          kind: 'file',
-          name: f.name,
-          mime: f.type || 'application/octet-stream',
-        },
-        body: new Uint8Array(buf),
+        manifest: { kind: 'file', name: zipBundleName(), mime: 'application/zip' },
+        body: fflate.zipSync(entries, { level: 6 }),
       };
     }
     if (mode === 'repo') {
@@ -1248,6 +1378,8 @@
     sendInput.disabled = disabled;
     sendFile.disabled = disabled;
     cfg.imgCompress.disabled = disabled;
+    btnSendFilesClear.disabled = disabled;
+    for (const b of sendFileList.querySelectorAll('.send-file-remove')) b.disabled = disabled;
     sendRepoUrl.disabled = disabled;
     btnRepoLoad.disabled = disabled;
     repoFilter.disabled = disabled;

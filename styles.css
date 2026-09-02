@@ -465,7 +465,8 @@ code {
   margin-bottom: 6px;
 }
 
-.repo-file-list {
+.repo-file-list,
+.send-file-list {
   max-height: 260px;
   overflow-y: auto;
   border: 1px solid var(--border);
@@ -473,7 +474,8 @@ code {
   padding: 4px;
 }
 
-.repo-file-row {
+.repo-file-row,
+.send-file-row {
   display: flex;
   align-items: center;
   gap: 8px;
@@ -481,20 +483,47 @@ code {
   font-size: 0.82rem;
   line-height: 1.5;
 }
-.repo-file-row:hover {
+.repo-file-row:hover,
+.send-file-row:hover {
   background: rgba(127, 127, 127, 0.12);
 }
 .repo-file-row input {
   flex: 0 0 auto;
   margin: 0;
 }
-.repo-file-path {
+.repo-file-path,
+.send-file-path {
   flex: 1 1 auto;
   min-width: 0;
   overflow-wrap: anywhere;
 }
-.repo-file-size {
+.repo-file-size,
+.send-file-size {
   flex: 0 0 auto;
   color: var(--muted);
   font-variant-numeric: tabular-nums;
+}
+
+.send-file-list {
+  margin-bottom: 6px;
+}
+
+.send-file-remove {
+  flex: 0 0 auto;
+  background: none;
+  border: 0;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 1rem;
+  line-height: 1;
+  padding: 2px 6px;
+  border-radius: 4px;
+}
+.send-file-remove:hover:not(:disabled) {
+  color: var(--warn);
+  background: rgba(127, 127, 127, 0.18);
+}
+.send-file-remove:disabled {
+  opacity: 0.4;
+  cursor: default;
 }
