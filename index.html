@@ -74,6 +74,11 @@
             <input id="repoFilter" type="text" class="range-input"
                    placeholder="パスで絞り込み（例: src/ や .md）"
                    autocomplete="off" spellcheck="false">
+            <select id="repoSort" aria-label="並び順">
+              <option value="path">パス順</option>
+              <option value="newest">更新日時（新しい順）</option>
+              <option value="oldest">更新日時（古い順）</option>
+            </select>
             <button id="btnRepoAll" class="btn btn-sm">表示中を選択</button>
             <button id="btnRepoNone" class="btn btn-sm">表示中を解除</button>
           </div>
