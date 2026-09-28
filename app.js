@@ -10,7 +10,7 @@
   const STORAGE_KEY = 'qrtt.settings.v1';
   // フッタに出す最終更新日。ビルド工程が無い（index.html を直接開ける）ので
   // 自動埋め込みができない。内容を変更したらここも更新すること。
-  const LAST_UPDATED = '2026-09-02';
+  const LAST_UPDATED = '2026-09-28';
   const LARGE_TRANSFER_BYTES = 2 * 1024 * 1024; // 2 MB confirm threshold
 
   const DEFAULT_SETTINGS = {
@@ -63,6 +63,7 @@
   const repoTreeStatus = $('repoTreeStatus');
   const repoPicker = $('repoPicker');
   const repoFilter = $('repoFilter');
+  const repoSort = $('repoSort');
   const btnRepoAll = $('btnRepoAll');
   const btnRepoNone = $('btnRepoNone');
   const repoFileList = $('repoFileList');
@@ -615,7 +616,104 @@
   function filteredRepoEntries() {
     const q = repoFilter.value.trim().toLowerCase();
     const all = repoTree ? repoTree.entries : [];
-    return q ? all.filter((e) => e.path.toLowerCase().includes(q)) : all;
+    const rows = q ? all.filter((e) => e.path.toLowerCase().includes(q)) : all.slice();
+    const order = repoSort.value;
+    if (order === 'path' || !repoTree || !repoTree.dates) return rows;
+    // 日付不明は並び順によらず末尾に置き、同日時どうしはパス順
+    const dir = order === 'newest' ? -1 : 1;
+    return rows.sort((a, b) => {
+      const da = repoTree.dates.get(a.path), db = repoTree.dates.get(b.path);
+      if (da && db && da !== db) return da < db ? -dir : dir;
+      if (!da !== !db) return da ? -1 : 1;
+      return a.path < b.path ? -1 : a.path > b.path ? 1 : 0;
+    });
+  }
+
+  // ----------------------------------------------------------------------
+  // Repo file dates
+  // ----------------------------------------------------------------------
+  // Git Trees API には日時が無いので、ブランチの first-parent 履歴を新しい順に
+  // 辿り、各コミットの変更ファイルから「最後に変わった日時」を割り当てる。
+  // first-parent に限るのは、PR の個々のコミットではなくマージ（ブランチに
+  // 入った時点）の日時にするため。未認証 API は 60req/hour なので上限を設け、
+  // 届かなかった古いファイルは日付不明のままにする。
+
+  const REPO_DATE_REQ_BUDGET = 40;
+
+  async function fetchRepoDates(tree, onP) {
+    const { owner, repo, ref } = tree;
+    const pending = new Set(tree.entries.map((e) => e.path));
+    const dates = new Map();
+    const known = new Map();   // sha → commit list entry
+    let reqs = 0;
+    let sha = null;
+
+    async function loadPage(from) {
+      reqs++;
+      const list = await ghJson(`repos/${owner}/${repo}/commits?sha=${encodeURIComponent(from)}&per_page=100`);
+      for (const c of list) known.set(c.sha, c);
+      return list;
+    }
+
+    const head = await loadPage(ref);
+    if (!head.length) return dates;
+    sha = head[0].sha;
+    while (pending.size && reqs < REPO_DATE_REQ_BUDGET) {
+      if (!known.has(sha)) {
+        await loadPage(sha);
+        if (!known.has(sha) || reqs >= REPO_DATE_REQ_BUDGET) break;
+      }
+      const c = known.get(sha);
+      reqs++;
+      const detail = await ghJson(`repos/${owner}/${repo}/commits/${sha}`);
+      const when = detail.commit && detail.commit.committer && detail.commit.committer.date;
+      for (const f of detail.files || []) {
+        for (const p of [f.filename, f.previous_filename]) {
+          if (p && pending.has(p) && when) { dates.set(p, when); pending.delete(p); }
+        }
+      }
+      onP(`更新日時を取得中: ${dates.size} / ${tree.entries.length} 件（${reqs} req）`);
+      if (!c.parents || !c.parents.length) break;   // ルートコミット
+      sha = c.parents[0].sha;
+    }
+    return dates;
+  }
+
+  async function ensureRepoDates() {
+    const tree = repoTree;
+    if (!tree || tree.dates || tree.datesLoading) return;
+    tree.datesLoading = true;
+    repoSort.disabled = true;
+    const base = repoTreeStatus.textContent;
+    const setStatus = (msg) => { if (repoTree === tree) repoTreeStatus.textContent = `${base} ｜ ${msg}`; };
+    let dates = null;
+    let error = null;
+    try {
+      dates = await fetchRepoDates(tree, setStatus);
+    } catch (err) {
+      error = err;
+    } finally {
+      tree.datesLoading = false;
+      if (repoTree === tree) repoSort.disabled = false;
+    }
+    if (repoTree !== tree) return;   // 取得中に一覧が差し替わった
+    if (error) {
+      setStatus(`更新日時の取得失敗: ${error.message}`);
+      repoSort.value = 'path';
+      return;
+    }
+    tree.dates = dates;
+    const missing = tree.entries.length - dates.size;
+    setStatus(missing > 0
+      ? `更新日時: ${dates.size} 件取得、${missing} 件は日付不明（取得上限を超える古い履歴など。末尾に表示）`
+      : '更新日時: 全件取得');
+    renderRepoFileList();
+  }
+
+  function formatRepoDate(iso) {
+    const d = new Date(iso);
+    const p = (n) => String(n).padStart(2, '0');
+    return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
   }
 
   function selectedRepoEntries() {
@@ -660,7 +758,15 @@
       const size = document.createElement('span');
       size.className = 'repo-file-size';
       size.textContent = formatBytes(e.size);
-      row.append(cb, path, size);
+      row.append(cb, path);
+      if (repoTree.dates) {
+        const iso = repoTree.dates.get(e.path);
+        const date = document.createElement('span');
+        date.className = 'repo-file-date';
+        date.textContent = iso ? formatRepoDate(iso) : '日付不明';
+        row.appendChild(date);
+      }
+      row.appendChild(size);
       frag.appendChild(row);
     }
     repoFileList.textContent = '';
@@ -692,6 +798,8 @@
     }
     repoSelected = new Set(repoTree.entries.map((e) => e.path));   // 既定は全選択
     repoFilter.value = '';
+    repoSort.value = 'path';
+    repoSort.disabled = false;
     repoPicker.hidden = false;
     repoTreeStatus.textContent = repoTree.truncated
       ? `⚠ ${repoTree.owner}/${repoTree.repo}@${repoTree.ref}: ツリーが大きすぎて切り詰められています（一部のみ）`
@@ -701,6 +809,10 @@
 
   btnRepoLoad.addEventListener('click', loadRepoTree);
   repoFilter.addEventListener('input', renderRepoFileList);
+  repoSort.addEventListener('change', () => {
+    renderRepoFileList();
+    if (repoSort.value !== 'path') ensureRepoDates();
+  });
   btnRepoAll.addEventListener('click', () => {
     for (const e of filteredRepoEntries()) repoSelected.add(e.path);
     renderRepoFileList();

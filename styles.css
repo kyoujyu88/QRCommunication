@@ -497,6 +497,7 @@ code {
   min-width: 0;
   overflow-wrap: anywhere;
 }
+.repo-file-date,
 .repo-file-size,
 .send-file-size {
   flex: 0 0 auto;
