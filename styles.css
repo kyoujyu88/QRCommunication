@@ -136,6 +136,7 @@ input[type=range] {
   transition: background 0.15s, opacity 0.15s;
 }
 
+.btn { white-space: nowrap; }
 .btn:hover:not(:disabled) { background: #2a3040; }
 .btn:disabled { opacity: 0.4; cursor: not-allowed; }
 
@@ -145,14 +146,54 @@ input[type=range] {
   -webkit-user-select: none;
 }
 
-/* QR直下の送り操作。QRが中央寄せなので合わせて中央に置く */
+/* 送信中に入力欄の代わりに出す、何を送っているかの要約 */
+.send-summary {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px 12px;
+  margin: 14px 0 0;
+  font-size: 0.88rem;
+  overflow-wrap: anywhere;
+}
+.send-summary[hidden] { display: none; }
+
+/* 全画面表示：QRを画面いっぱいに出して、離れた位置や小さい画面でも読ませる */
+.send-stage.is-focus {
+  position: fixed;
+  inset: 0;
+  z-index: 20;
+  background: #fff;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: env(safe-area-inset-top) 8px env(safe-area-inset-bottom);
+}
+.send-stage.is-focus .qr-wrap {
+  width: min(calc(100vw - 16px), calc(100vh - 88px));
+  width: min(calc(100vw - 16px), calc(100dvh - 88px));
+  max-width: none;
+  margin: 0;
+  padding: 4px;
+  border-radius: 0;
+}
+.send-stage.is-focus .transport-row { margin: 8px 0 0; }
+.send-stage.is-focus .frame-no { color: #111; }
+body.no-scroll { overflow: hidden; }
+
+/* QR直下の送り操作。QRが中央寄せなので合わせて中央に置く。
+   スマホ幅でも1行に収まるよう、ここのボタンは少し詰める */
 .transport-row {
   justify-content: center;
+  flex-wrap: nowrap;
+  gap: 6px;
 }
+.transport-row .btn { padding: 8px 12px; }
 
 /* 巻き戻し/早送りの間に出す、表示中QRの番号 */
 .frame-no {
-  min-width: 7em;
+  min-width: 5.5em;
   text-align: center;
   font-variant-numeric: tabular-nums;
   font-weight: 600;
@@ -222,6 +263,18 @@ input[type=range] {
   aspect-ratio: 4 / 3;
 }
 
+/* カメラ停止中は黒い枠だけにならないよう案内を出す */
+#paneRecv .video-wrap:not(.is-live)::after {
+  content: 'カメラ停止中';
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
 #cam {
   width: 100%;
   height: 100%;
@@ -248,6 +301,26 @@ input[type=range] {
   transition: background 0.2s;
 }
 .cam-frame-no[hidden] { display: none; }
+
+/* カメラ映像の右下：1秒あたりに解析できたフレーム数（送信FPSの目安） */
+.cam-scan-rate {
+  position: absolute;
+  right: 8px;
+  bottom: 8px;
+  z-index: 1;
+  padding: 2px 8px;
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.55);
+  color: #fff;
+  font-size: 0.8rem;
+  font-variant-numeric: tabular-nums;
+  pointer-events: none;
+}
+.cam-scan-rate[hidden] { display: none; }
+
+.recv-cam-actions {
+  margin-top: -4px;
+}
 .cam-frame-no.is-new { background: rgba(46, 160, 67, 0.85); }
 
 .range-row {
@@ -323,6 +396,15 @@ progress {
 .grid .cell.got {
   background: var(--ok);
 }
+
+/* チャンク数が多いときはマスを小さくし、高さも抑えてスクロールさせる */
+.grid.is-dense {
+  grid-template-columns: repeat(auto-fill, minmax(6px, 1fr));
+  gap: 1px;
+  max-height: 168px;
+  overflow-y: auto;
+}
+.grid.is-dense .cell { border-radius: 0; }
 
 h2 {
   font-size: 1rem;

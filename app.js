@@ -5,13 +5,14 @@
   // Constants
   // ----------------------------------------------------------------------
 
-  const PROTOCOL_TAG = 'QRT2';
+  const PROTOCOL_TAG = 'QRT2';    // 旧形式（base64・バイトモード）。受信のみ対応
+  const PROTOCOL_V3_TAG = 'Q3';   // 現行形式（base45・英数字モード・圧縮）
   const MISSING_QR_TAG = 'QRTM'; // missing-range side-channel, distinct from data frames
   const MISSING_QR_MULTI_TAG = 'QRTN'; // same, split across several cycling QRs
   const STORAGE_KEY = 'qrtt.settings.v1';
   // フッタに出す最終更新日。ビルド工程が無い（index.html を直接開ける）ので
   // 自動埋め込みができない。内容を変更したらここも更新すること。
-  const LAST_UPDATED = '2026-09-28';
+  const LAST_UPDATED = '2026-10-06';
   const LARGE_TRANSFER_BYTES = 2 * 1024 * 1024; // 2 MB confirm threshold
 
   const DEFAULT_SETTINGS = {
@@ -24,7 +25,9 @@
     facing: 'environment',
     resolution: 640,
     inversion: 'dontInvert',
+    decoder: 'auto',
     imgCompress: '50',
+    protocol: 'v3',
   };
 
   // ----------------------------------------------------------------------
@@ -57,6 +60,11 @@
   const btnSendPrev = $('btnSendPrev');
   const btnSendNext = $('btnSendNext');
   const sendFrameNo = $('sendFrameNo');
+  const sendSetup = $('sendSetup');
+  const sendSummary = $('sendSummary');
+  const sendStage = $('sendStage');
+  const btnSendFocus = $('btnSendFocus');
+  const sendTextInfo = $('sendTextInfo');
   const sendStatus = $('sendStatus');
   const qrCanvas = $('qrCanvas');
   const sendRange = $('sendRange');
@@ -78,6 +86,7 @@
   const btnRecvReset = $('btnRecvReset');
   const cam = $('cam');
   const recvFrameNo = $('recvFrameNo');
+  const recvScanRate = $('recvScanRate');
   const scanCanvas = $('scanCanvas');
   const recvProgress = $('recvProgress');
   const recvStatus = $('recvStatus');
@@ -92,6 +101,7 @@
   const wakeLockWarn = $('wakeLockWarn');
   const recvMissingRow = $('recvMissingRow');
   const recvMissingList = $('recvMissingList');
+  const recvMissingCount = $('recvMissingCount');
   const btnCopyMissing = $('btnCopyMissing');
   const btnShowMissingQr = $('btnShowMissingQr');
   const btnScanRange = $('btnScanRange');
@@ -115,7 +125,9 @@
     facing: $('cfgFacing'),
     resolution: $('cfgResolution'),
     inversion: $('cfgInversion'),
+    decoder: $('cfgDecoder'),
     imgCompress: $('cfgImgCompress'),
+    protocol: $('cfgProtocol'),
   };
   const imgCompressField = $('imgCompressField');
   const out = {
@@ -139,6 +151,7 @@
     const v = s.imgCompress;
     if (LEGACY_IMG_COMPRESS[v]) s.imgCompress = LEGACY_IMG_COMPRESS[v];
     else if (v !== 'none' && !IMG_SCALES[v]) s.imgCompress = DEFAULT_SETTINGS.imgCompress;
+    if (s.protocol !== 'v3' && s.protocol !== 'v2') s.protocol = DEFAULT_SETTINGS.protocol;
     return s;
   }
 
@@ -178,7 +191,9 @@
       facing: cfg.facing.value,
       resolution: +cfg.resolution.value,
       inversion: cfg.inversion.value,
+      decoder: cfg.decoder.value,
       imgCompress: cfg.imgCompress.value,
+      protocol: cfg.protocol.value,
     };
   }
 
@@ -192,7 +207,9 @@
     cfg.facing.value = s.facing;
     cfg.resolution.value = s.resolution;
     cfg.inversion.value = s.inversion;
+    cfg.decoder.value = s.decoder;
     cfg.imgCompress.value = s.imgCompress;
+    cfg.protocol.value = s.protocol;
     updateOutputs();
   }
 
@@ -210,6 +227,7 @@
         saveSettings(settingsFromInputs());
         refreshSendFileInfo();
         updateRepoSummary();
+        scheduleTextInfo();
       });
     });
     btnResetSettings.addEventListener('click', () => {
@@ -342,6 +360,120 @@
     return bytes;
   }
 
+  // ---------- 転送形式 v3 ----------
+  // QR の英数字モードは1文字5.5ビットで符号化される。base64 をバイトモードで
+  // 送ると1文字8ビットの枠に6ビットしか載らないので、英数字モードで使える
+  // 45文字だけでバイト列を表す base45（RFC 9285）に替えると、同じ大きさの
+  // QR に約3割多くのデータが載る。ヘッダも同じ45文字の範囲で組む。
+  //   Q3:<セッションID>:<番号>:<総数>:<base45>
+  const B45_CHARS = '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ $%*+-./:';
+  const B45_VALUE = (() => {
+    const m = new Int8Array(128).fill(-1);
+    for (let i = 0; i < B45_CHARS.length; i++) m[B45_CHARS.charCodeAt(i)] = i;
+    return m;
+  })();
+
+  function bytesToBase45(bytes) {
+    let s = '';
+    let i = 0;
+    for (; i + 1 < bytes.length; i += 2) {
+      let n = bytes[i] * 256 + bytes[i + 1];
+      const c = n % 45;
+      n = (n - c) / 45;
+      const d = n % 45;
+      s += B45_CHARS[c] + B45_CHARS[d] + B45_CHARS[(n - d) / 45];
+    }
+    if (i < bytes.length) {
+      const n = bytes[i];
+      s += B45_CHARS[n % 45] + B45_CHARS[(n - (n % 45)) / 45];
+    }
+    return s;
+  }
+
+  // 不正な文字や桁あふれがあれば null（読み違いのフレームとして捨てる）
+  function base45ToBytes(s) {
+    const rem = s.length % 3;
+    if (rem === 1) return null;
+    const out = new Uint8Array(((s.length - rem) / 3) * 2 + (rem ? 1 : 0));
+    const val = (k) => {
+      const ch = s.charCodeAt(k);
+      return ch < 128 ? B45_VALUE[ch] : -1;
+    };
+    let o = 0;
+    let i = 0;
+    for (; i + 2 < s.length; i += 3) {
+      const c = val(i), d = val(i + 1), e = val(i + 2);
+      if (c < 0 || d < 0 || e < 0) return null;
+      const n = c + d * 45 + e * 2025;
+      if (n > 0xffff) return null;
+      out[o++] = n >> 8;
+      out[o++] = n & 0xff;
+    }
+    if (rem) {
+      const c = val(i), d = val(i + 1);
+      if (c < 0 || d < 0) return null;
+      const n = c + d * 45;
+      if (n > 0xff) return null;
+      out[o++] = n;
+    }
+    return out;
+  }
+
+  // 設定の「1枚あたりのデータ量」は QR のバイトモード換算の容量。旧形式と
+  // 同じ値なら QR の大きさ（読み取りやすさ）はほぼ同じまま、載る実データが
+  // 約3割増える。base45 は2バイト→3文字なので偶数バイトに揃える。
+  function rawBytesPerFrame(chunkSize) {
+    return Math.max(2, Math.floor((chunkSize * 16) / 11 / 3) * 2);
+  }
+
+  // FNV-1a。セッションIDを中身から決めるのに使う（暗号用途ではない）。
+  function fnv1a(bytes, seed) {
+    let h = (0x811c9dc5 ^ seed) >>> 0;
+    for (let i = 0; i < bytes.length; i++) {
+      h ^= bytes[i];
+      h = Math.imul(h, 0x01000193);
+    }
+    return h >>> 0;
+  }
+
+  // セッションIDを送るデータとチャンクの切り方から決める。送信側を止めて
+  // 設定（FPSなど）を変えて再開しても、中身と1枚あたりの量が同じなら同じ
+  // セッションとして扱われ、受信側の途中経過が消えない。受信側は全部
+  // そろった時点で同じ計算をし、別の送信が混ざっていないかを検証する。
+  function sessionIdFor(wire, rawPerFrame, total) {
+    return fnv1a(wire, total > 1 ? rawPerFrame : 0).toString(36).toUpperCase();
+  }
+
+  // 送る直前のデータの先頭1バイトが形式を表す（0 = そのまま、1 = deflate）。
+  // テキストや未圧縮のファイルは 1/2〜1/3 程度になり、その分だけ早く終わる。
+  const WIRE_RAW = 0;
+  const WIRE_DEFLATE = 1;
+  const PRECOMPRESSED_MIME = /^(image|video|audio)\/|zip|gzip|x-7z|x-rar|x-xz|x-bzip/i;
+
+  function shouldCompress(manifest) {
+    return !(manifest.mime && PRECOMPRESSED_MIME.test(manifest.mime));
+  }
+
+  function buildWireBytes(blob, tryCompress) {
+    let packed = null;
+    if (tryCompress) {
+      try { packed = fflate.deflateSync(blob, { level: 6 }); } catch { packed = null; }
+    }
+    const useDeflate = !!packed && packed.length < blob.length * 0.95;
+    const body = useDeflate ? packed : blob;
+    const wire = new Uint8Array(body.length + 1);
+    wire[0] = useDeflate ? WIRE_DEFLATE : WIRE_RAW;
+    wire.set(body, 1);
+    return { wire, compressed: useDeflate };
+  }
+
+  function unwrapWireBytes(wire) {
+    if (!wire.length) throw new Error('データが空です');
+    if (wire[0] === WIRE_RAW) return wire.subarray(1);
+    if (wire[0] === WIRE_DEFLATE) return fflate.inflateSync(wire.subarray(1));
+    throw new Error('未対応のデータ形式です（送信側のほうが新しいバージョンの可能性があります）');
+  }
+
   function buildBlobBytes(manifest, body) {
     const json = new TextEncoder().encode(JSON.stringify(manifest));
     const buf = new Uint8Array(4 + json.length + body.length);
@@ -419,10 +551,27 @@
     return Math.random().toString(36).slice(2, 8);
   }
 
-  function encodeFramesFromBytes(blobBytes, chunkSize) {
-    const b64 = bytesToBase64(blobBytes);
+  function encodeFrames(wire, chunkSize) {
+    const raw = rawBytesPerFrame(chunkSize);
+    const total = Math.max(1, Math.ceil(wire.length / raw));
+    const sessionId = sessionIdFor(wire, raw, total);
+    const frames = [];
+    for (let i = 0; i < total; i++) {
+      const payload = bytesToBase45(wire.subarray(i * raw, (i + 1) * raw));
+      frames.push(`${PROTOCOL_V3_TAG}:${sessionId}:${i}:${total}:${payload}`);
+    }
+    return { frames, sessionId, total };
+  }
+
+  // 旧形式（QRT2）。旧バージョンの受信側はこれしか読めないので互換用に残す。
+  // 圧縮せず、送るデータ全体を base64 にしてバイトモードで送る。chunkSize は
+  // そのまま1枚あたりの base64 文字数（= QR のバイト数）になる。
+  // セッションIDは新形式と同じく中身から決める（旧受信側は任意の文字列を
+  // 受け付ける）ので、最新の受信側なら送信を再開しても途中経過を引き継げる。
+  function encodeFramesLegacy(blob, chunkSize) {
+    const b64 = bytesToBase64(blob);
     const total = Math.max(1, Math.ceil(b64.length / chunkSize));
-    const sessionId = newSessionId();
+    const sessionId = fnv1a(blob, chunkSize).toString(36);
     const frames = [];
     for (let i = 0; i < total; i++) {
       const payload = b64.slice(i * chunkSize, (i + 1) * chunkSize);
@@ -431,8 +580,19 @@
     return { frames, sessionId, total };
   }
 
+  // 送信形式に応じて、実際に送るバイト列を用意する。旧形式は圧縮しない
+  // （旧受信側は先頭の形式バイトも deflate も知らない）。
+  function prepareWire(blob, manifest, protocol) {
+    if (protocol === 'v2') return { wire: blob, compressed: false };
+    return buildWireBytes(blob, shouldCompress(manifest));
+  }
+
+  // 読み取った文字列を { version, sessionId, index, total, payload } にする。
+  // payload は v3 ならバイト列、旧形式(v2)なら base64 文字列。
   function parseFrame(text) {
-    if (typeof text !== 'string' || !text.startsWith(PROTOCOL_TAG + '|')) return null;
+    if (typeof text !== 'string') return null;
+    if (text.startsWith(PROTOCOL_V3_TAG + ':')) return parseFrameV3(text);
+    if (!text.startsWith(PROTOCOL_TAG + '|')) return null;
     const head = text.indexOf('|');
     const a = text.indexOf('|', head + 1);
     const b = text.indexOf('|', a + 1);
@@ -444,7 +604,25 @@
     const payload = text.slice(c + 1);
     if (!sessionId || !Number.isInteger(index) || !Number.isInteger(total) || total <= 0) return null;
     if (index < 0 || index >= total) return null;
-    return { sessionId, index, total, payload };
+    return { version: 2, sessionId, index, total, payload };
+  }
+
+  function parseFrameV3(text) {
+    const a = PROTOCOL_V3_TAG.length + 1;
+    const b = text.indexOf(':', a);
+    const c = b < 0 ? -1 : text.indexOf(':', b + 1);
+    const d = c < 0 ? -1 : text.indexOf(':', c + 1);
+    if (d < 0) return null;
+    const sessionId = text.slice(a, b);
+    const indexStr = text.slice(b + 1, c);
+    const totalStr = text.slice(c + 1, d);
+    if (!/^[0-9A-Z]+$/.test(sessionId) || !/^\d+$/.test(indexStr) || !/^\d+$/.test(totalStr)) return null;
+    const index = +indexStr;
+    const total = +totalStr;
+    if (total <= 0 || index >= total) return null;
+    const payload = base45ToBytes(text.slice(d + 1));
+    if (!payload) return null;
+    return { version: 3, sessionId, index, total, payload };
   }
 
   // ----------------------------------------------------------------------
@@ -454,7 +632,7 @@
   function drawQrToCanvas(canvas, text, opts) {
     const { typeNumber, ecc, cellSize, margin } = opts;
     const qr = qrcode(typeNumber, ecc);
-    qr.addData(text, 'Byte');
+    qr.addData(text, opts.mode || 'Byte');
     qr.make();
     const count = qr.getModuleCount();
     const size = count * cellSize + margin * 2;
@@ -475,11 +653,11 @@
 
   // Pick a single typeNumber covering the longest frame so every chunk
   // renders at the same QR size.
-  function resolveTypeNumber(frames, ecc) {
+  function resolveTypeNumber(frames, ecc, mode) {
     let longest = frames[0];
     for (const f of frames) if (f.length > longest.length) longest = f;
     const qr = qrcode(0, ecc);
-    qr.addData(longest, 'Byte');
+    qr.addData(longest, mode || 'Byte');
     qr.make();
     return (qr.getModuleCount() - 17) / 4;
   }
@@ -1096,6 +1274,32 @@
       + `（zip 後は縮むため実際はこれより短くなります）`;
   }
 
+  // ---------- テキストの送信量と推定時間 ----------
+  // ファイルと同じく、送る前に「何枚・何秒か」を出す。テキストは圧縮が
+  // よく効くので、実際に送る形（圧縮後）で数える。入力のたびに圧縮すると
+  // 重いので少し待ってからまとめて計算する。
+  let textInfoTimer = null;
+  function scheduleTextInfo() {
+    clearTimeout(textInfoTimer);
+    textInfoTimer = setTimeout(refreshTextInfo, 250);
+  }
+
+  function refreshTextInfo() {
+    const text = sendInput.value;
+    if (!text) { sendTextInfo.textContent = ''; return; }
+    const body = new TextEncoder().encode(text);
+    const blob = buildBlobBytes({ kind: 'text', name: 'message.txt' }, body);
+    const s = settingsFromInputs();
+    const { wire, compressed } = prepareWire(blob, { kind: 'text' }, s.protocol);
+    const frames = estimateFrames(wire.length, s.chunkSize);
+    sendTextInfo.textContent =
+      `${formatBytes(body.length)}${compressed ? ` → 圧縮後 ${formatBytes(wire.length)}` : ''}`
+      + ` ｜ ${frames}枚 ｜ 推定 ${formatDuration(estimateSeconds(wire.length, s.chunkSize, s.fps))}`
+      + (s.protocol === 'v2' ? ' ｜ 旧形式' : '');
+  }
+
+  sendInput.addEventListener('input', scheduleTextInfo);
+
   // ----------------------------------------------------------------------
   // Send data gathering (per mode)
   // ----------------------------------------------------------------------
@@ -1165,10 +1369,13 @@
     throw new Error(`不明なモード: ${mode}`);
   }
 
-  function estimateSeconds(blobBytes, chunkSize, fps) {
-    const b64Len = Math.ceil(blobBytes / 3) * 4;
-    const totalFrames = Math.ceil(b64Len / chunkSize);
-    return Math.max(1, Math.ceil(totalFrames / fps));
+  function estimateFrames(bytes, chunkSize, protocol = cfg.protocol.value) {
+    if (protocol === 'v2') return Math.max(1, Math.ceil((Math.ceil(bytes / 3) * 4) / chunkSize));
+    return Math.max(1, Math.ceil(bytes / rawBytesPerFrame(chunkSize)));
+  }
+
+  function estimateSeconds(bytes, chunkSize, fps) {
+    return Math.max(1, Math.ceil(estimateFrames(bytes, chunkSize) / fps));
   }
 
   function formatDuration(sec) {
@@ -1279,6 +1486,7 @@
   let sendTickMs = 500;
   let sendMeta = null;      // { kind, sizeLabel }
   let sendBusy = false;
+  let sendLoops = 0;        // 何周目か（受信側が何周待てばよいかの目安）
 
   function clearSendTimer() {
     if (sendTimer) { clearInterval(sendTimer); sendTimer = null; }
@@ -1301,15 +1509,16 @@
     const subsetLabel = sendActive.length === total
       ? ''
       : ` ｜ 範囲 ${sendActive.length}枚`;
-    sendStatus.textContent =
-      `[${sendMeta.kind}] ${realIdx + 1} / ${total}${subsetLabel} ｜ ${sendMeta.sizeLabel} ｜ loop`;
+    sendStatus.textContent = `送信中 ${sendLoops}周目${subsetLabel}`;
     sendFrameNo.textContent = `${realIdx + 1} / ${total}`;
     sendIndex = (sendIndex + 1) % sendActive.length;
+    if (sendIndex === 0) sendLoops++;
   }
 
   function startSendLoop() {
     clearSendTimer();
     sendIndex = 0;
+    sendLoops = 1;
     if (!sendActive.length) {
       sendStatus.textContent = '送信対象がありません';
       return;
@@ -1369,6 +1578,36 @@
   bindHoldToStep(btnSendPrev, stepSendBackward);
   bindHoldToStep(btnSendNext, stepSendForward);
 
+  // ---------- 全画面表示 ----------
+  // QRが大きいほど遠くから・斜めからでも読めて、取りこぼしが減る。iPhone の
+  // Safari は要素の Fullscreen API に対応しないので、CSS の固定配置で画面を
+  // 覆い、使える環境ではブラウザのUIも消すために Fullscreen API も併用する。
+  function setSendFocus(on) {
+    const isOn = sendStage.classList.contains('is-focus');
+    if (on === isOn) return;
+    sendStage.classList.toggle('is-focus', on);
+    document.body.classList.toggle('no-scroll', on);
+    btnSendFocus.textContent = on ? '✕ 戻る' : '⛶';
+    if (on) {
+      if (sendStage.requestFullscreen && !document.fullscreenElement) {
+        sendStage.requestFullscreen().catch(() => {});
+      }
+    } else if (document.fullscreenElement) {
+      document.exitFullscreen().catch(() => {});
+    }
+  }
+
+  btnSendFocus.addEventListener('click', () => {
+    setSendFocus(!sendStage.classList.contains('is-focus'));
+  });
+  // 戻るジェスチャや Esc でブラウザ側の全画面だけが解除された場合も合わせる
+  document.addEventListener('fullscreenchange', () => {
+    if (!document.fullscreenElement) setSendFocus(false);
+  });
+  document.addEventListener('keydown', (ev) => {
+    if (ev.key === 'Escape') setSendFocus(false);
+  });
+
   // Read the user's range input, validate against sendAllFrames, update sendActive.
   // Returns true on success (caller should restart the loop).
   function applyRangeFromInput() {
@@ -1405,9 +1644,16 @@
 
     const s = settingsFromInputs();
     const blob = buildBlobBytes(gathered.manifest, gathered.body);
-    const eta = estimateSeconds(blob.length, s.chunkSize, s.fps);
-    const sizeLabel = formatBytes(blob.length);
-    const proceed = blob.length > LARGE_TRANSFER_BYTES
+    sendStatus.textContent = '準備中…';
+    // 大きいファイルの圧縮は同期処理で数百msかかるので、先に表示を更新させる
+    await new Promise((r) => setTimeout(r, 0));
+    const legacy = s.protocol === 'v2';
+    const { wire, compressed } = prepareWire(blob, gathered.manifest, s.protocol);
+    const eta = estimateSeconds(wire.length, s.chunkSize, s.fps);
+    const sizeLabel = compressed
+      ? `${formatBytes(wire.length)}（圧縮前 ${formatBytes(blob.length)}）`
+      : formatBytes(wire.length);
+    const proceed = wire.length > LARGE_TRANSFER_BYTES
       ? confirm(
           `送信予定: ${sizeLabel}\n` +
           `現在の設定での推定転送時間は ${formatDuration(eta)} です。\n` +
@@ -1424,7 +1670,9 @@
 
     let frames;
     try {
-      frames = encodeFramesFromBytes(blob, s.chunkSize).frames;
+      frames = legacy
+        ? encodeFramesLegacy(wire, s.chunkSize).frames
+        : encodeFrames(wire, s.chunkSize).frames;
     } catch (err) {
       sendStatus.textContent = `フレーム生成エラー: ${err.message}`;
       btnSendStart.disabled = false;
@@ -1436,7 +1684,7 @@
     let typeNumber = s.typeNumber;
     if (typeNumber === 0) {
       try {
-        typeNumber = resolveTypeNumber(frames, s.ecc);
+        typeNumber = resolveTypeNumber(frames, s.ecc, legacy ? 'Byte' : 'Alphanumeric');
       } catch (err) {
         sendStatus.textContent = `QR生成エラー: ${err.message}（チャンクサイズを下げてください）`;
         btnSendStart.disabled = false;
@@ -1446,9 +1694,18 @@
       }
     }
 
-    sendRenderOpts = { typeNumber, ecc: s.ecc, cellSize: s.cellSize, margin: s.margin };
+    sendRenderOpts = {
+      typeNumber, ecc: s.ecc, cellSize: s.cellSize, margin: s.margin,
+      mode: legacy ? 'Byte' : 'Alphanumeric',
+    };
     sendTickMs = Math.max(50, Math.round(1000 / s.fps));
     sendMeta = { kind: gathered.manifest.kind, sizeLabel };
+
+    const KIND_LABEL = { text: 'テキスト', file: 'ファイル', repo: 'リポジトリ' };
+    sendSummary.textContent =
+      `${KIND_LABEL[gathered.manifest.kind] || gathered.manifest.kind}：${gathered.manifest.name}`
+      + ` ｜ ${sizeLabel} ｜ ${frames.length}枚 ｜ 1周 約${formatDuration(Math.max(1, Math.ceil(frames.length / s.fps)))}`
+      + (legacy ? ' ｜ 旧形式（互換）' : '');
 
     // Honor any pre-filled range; fall back to all on parse error
     if (!applyRangeFromInput()) {
@@ -1458,9 +1715,14 @@
     btnSendStop.disabled = false;
     btnSendPrev.disabled = false;
     btnSendNext.disabled = false;
+    btnSendFocus.disabled = false;
     setSendInputsDisabled(true);
+    // 入力欄を畳んで要約に置き換え、QRが1画面に収まるようにする
+    sendSetup.hidden = true;
+    sendSummary.hidden = false;
     requestWakeLock('send');
     startSendLoop();
+    sendStage.scrollIntoView({ block: 'nearest' });
   }
 
   function stopSend() {
@@ -1470,7 +1732,11 @@
     btnSendStop.disabled = true;
     btnSendPrev.disabled = true;
     btnSendNext.disabled = true;
+    btnSendFocus.disabled = true;
+    setSendFocus(false);
     setSendInputsDisabled(false);
+    sendSetup.hidden = false;
+    sendSummary.hidden = true;
     sendBusy = false;
     if (sendAllFrames.length) {
       sendStatus.textContent = `停止（${sendAllFrames.length}枚生成済み）`;
@@ -1515,7 +1781,7 @@
   // ----------------------------------------------------------------------
 
   let stream = null;
-  let scanRaf = null;
+  let scanEngine = null;
   let recvState = null;
   let recvBlobUrl = null;
   let recvFilename = null;
@@ -1544,6 +1810,9 @@
     recvMissingRow.hidden = true;
     recvMissingRow.classList.remove('is-complete');
     recvMissingList.textContent = '—';
+    recvMissingCount.textContent = '';
+    recvMissingText = '';
+    recvGrid.classList.remove('is-dense');
     btnCopyMissing.disabled = true;
     btnShowMissingQr.disabled = true;
     hideRecvFrameNo();
@@ -1572,6 +1841,22 @@
     recvFrameNo.textContent = '';
   }
 
+  // 未受信リストの再計算は総数に比例するので、読み取りのたびではなく
+  // 描画1回につき1度にまとめる（スキャン処理の邪魔をしない）。
+  let missingDisplayRaf = null;
+  function scheduleMissingDisplay() {
+    if (missingDisplayRaf) return;
+    missingDisplayRaf = requestAnimationFrame(() => {
+      missingDisplayRaf = null;
+      updateMissingDisplay();
+    });
+  }
+
+  // 未受信番号の全文。画面には長すぎる分を省いて出すので、コピーと
+  // 「QRで送る」はこちらを使う。
+  let recvMissingText = '';
+  const MISSING_DISPLAY_MAX = 160;
+
   function updateMissingDisplay() {
     if (!recvState) return;
     const missing = [];
@@ -1579,12 +1864,19 @@
       if (recvState.chunks[i] == null) missing.push(i);
     }
     if (missing.length === 0) {
+      recvMissingText = '';
       recvMissingList.textContent = '（全て受信済み）';
+      recvMissingCount.textContent = '';
       recvMissingRow.classList.add('is-complete');
       btnCopyMissing.disabled = true;
       btnShowMissingQr.disabled = true;
     } else {
-      recvMissingList.textContent = formatIndexRanges(missing);
+      recvMissingText = formatIndexRanges(missing);
+      // 飛び飛びの欠けが多いと数万文字になり画面が埋まるので先頭だけ出す
+      recvMissingList.textContent = recvMissingText.length > MISSING_DISPLAY_MAX
+        ? recvMissingText.slice(0, Math.max(1, recvMissingText.lastIndexOf(',', MISSING_DISPLAY_MAX))) + ', …'
+        : recvMissingText;
+      recvMissingCount.textContent = `（${missing.length}件）`;
       recvMissingRow.classList.remove('is-complete');
       btnCopyMissing.disabled = false;
       btnShowMissingQr.disabled = false;
@@ -1592,16 +1884,19 @@
     recvMissingRow.hidden = false;
   }
 
-  function initRecvSession(sessionId, total) {
+  function initRecvSession(version, sessionId, total) {
     recvState = {
+      version,
       sessionId,
       total,
       chunks: new Array(total),
       gotCount: 0,
+      firstAt: 0,
     };
     recvProgress.max = total;
     recvProgress.value = 0;
     recvGrid.innerHTML = '';
+    recvGrid.classList.toggle('is-dense', total > 300);
     for (let i = 0; i < total; i++) {
       const c = document.createElement('div');
       c.className = 'cell';
@@ -1620,33 +1915,67 @@
   }
 
   function ingestFrame(frame) {
-    if (!recvState || recvState.sessionId !== frame.sessionId || recvState.total !== frame.total) {
-      initRecvSession(frame.sessionId, frame.total);
+    if (!recvState || recvState.version !== frame.version
+        || recvState.sessionId !== frame.sessionId || recvState.total !== frame.total) {
+      // 受信し終えた結果は、カメラに別のQRが映っても消さない（「クリア」で消す）
+      if (recvState && recvState.done) return;
+      initRecvSession(frame.version, frame.sessionId, frame.total);
     }
+    if (recvState.done) return;
     const isNew = recvState.chunks[frame.index] == null;
     showRecvFrameNo(frame, isNew);
     if (!isNew) return;
+    const now = performance.now();
+    if (!recvState.firstAt) recvState.firstAt = now;
     recvState.chunks[frame.index] = frame.payload;
     recvState.gotCount += 1;
     recvProgress.value = recvState.gotCount;
-    recvStatus.textContent =
-      `セッション ${recvState.sessionId} : ${recvState.gotCount} / ${recvState.total} 受信`;
+    const elapsed = (now - recvState.firstAt) / 1000;
+    const pace = elapsed >= 1 ? ` ｜ ${(recvState.gotCount / elapsed).toFixed(1)}枚/秒` : '';
+    recvStatus.textContent = `受信 ${recvState.gotCount} / ${recvState.total}${pace}`;
     const cell = recvGrid.children[frame.index];
     if (cell) cell.classList.add('got');
-    updateMissingDisplay();
+    scheduleMissingDisplay();
 
-    if (recvState.gotCount === recvState.total) {
-      try {
-        const b64 = recvState.chunks.join('');
-        const composite = base64ToBytes(b64);
-        const { manifest, body } = parseBlobBytes(composite);
-        presentResult(manifest, body);
-        recvStatus.textContent =
-          `完了 ${recvState.total} 枚（セッション ${recvState.sessionId}）`;
-      } catch (err) {
-        recvStatus.textContent = `復号エラー: ${err.message}`;
-      }
+    if (recvState.gotCount === recvState.total) finishRecv(elapsed);
+  }
+
+  // 全チャンクがそろったら復元し、カメラを止めて結果を見せる
+  function finishRecv(elapsed) {
+    recvState.done = true;
+    let result;
+    try {
+      result = assembleRecv(recvState);
+    } catch (err) {
+      // 壊れた状態を残すと同じセッションのQRを読んでも先に進めないので捨てる
+      stopRecv();
+      resetRecvState();
+      recvStatus.textContent = `復号エラー: ${err.message}`;
+      return;
     }
+    presentResult(result.manifest, result.body);
+    updateMissingDisplay();
+    stopRecv();
+    recvStatus.textContent =
+      `完了 ${recvState.total}枚 ｜ ${formatBytes(result.body.length)} ｜ ${formatDuration(Math.max(1, Math.round(elapsed)))}`;
+    if (navigator.vibrate) navigator.vibrate(200);
+    recvResult.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+  }
+
+  function assembleRecv(st) {
+    if (st.version === 2) {
+      return parseBlobBytes(base64ToBytes(st.chunks.join('')));
+    }
+    let len = 0;
+    for (const c of st.chunks) len += c.length;
+    const wire = new Uint8Array(len);
+    let o = 0;
+    for (const c of st.chunks) { wire.set(c, o); o += c.length; }
+    const raw = st.total > 1 ? st.chunks[0].length : 0;
+    if (sessionIdFor(wire, raw, st.total) !== st.sessionId) {
+      throw new Error('検証に失敗しました（別の送信のQRが混ざった可能性があります。もう一度カメラを開始してください）');
+    }
+    return parseBlobBytes(unwrapWireBytes(wire));
   }
 
   function presentResult(manifest, body) {
@@ -1700,11 +2029,14 @@
   }
 
   async function startRecv() {
+    if (stream || btnRecvStart.disabled) return;
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
       recvStatus.textContent = 'このブラウザはカメラAPIに対応していません';
       httpsWarn.hidden = false;
       return;
     }
+    // 権限ダイアログ待ちの間の連打で、カメラを二重に開かないようにする
+    btnRecvStart.disabled = true;
     const s = settingsFromInputs();
     const desiredWidth = s.resolution;
     const desiredHeight = Math.round((desiredWidth * 3) / 4);
@@ -1720,49 +2052,194 @@
     } catch (err) {
       recvStatus.textContent = `カメラ起動失敗: ${err.name} ${err.message}`;
       if (!isSecureCameraContext()) httpsWarn.hidden = false;
+      btnRecvStart.disabled = false;
       return;
     }
 
     cam.srcObject = stream;
     await cam.play().catch(() => {});
+    cam.parentElement.classList.add('is-live');
 
-    btnRecvStart.disabled = true;
     btnRecvStop.disabled = false;
+    // 受信済みの結果は残したまま、次の送信も受け付けられるようにする
+    // （新しいセッションのQRが映った時点で前の結果は置き換わる）
+    if (recvState && recvState.done) recvState.done = false;
     recvStatus.textContent = 'スキャン中…';
     // カメラプレビュー中に画面が保たれる保証はどのOSにも無く、受信側が寝ると
     // 転送そのものが止まるので、送信側と同じくロックを取る。
     requestWakeLock('recv');
 
-    const ctx = scanCanvas.getContext('2d', { willReadFrequently: true });
-    const scan = () => {
-      if (!stream) return;
-      if (cam.readyState >= cam.HAVE_CURRENT_DATA && cam.videoWidth > 0) {
-        const w = cam.videoWidth;
-        const h = cam.videoHeight;
-        if (scanCanvas.width !== w) scanCanvas.width = w;
-        if (scanCanvas.height !== h) scanCanvas.height = h;
-        ctx.drawImage(cam, 0, 0, w, h);
-        const img = ctx.getImageData(0, 0, w, h);
-        const code = jsQR(img.data, w, h, { inversionAttempts: s.inversion });
-        if (code && code.data) {
-          const frame = parseFrame(code.data);
-          if (frame) ingestFrame(frame);
+    const engine = await startScanEngine({
+      video: cam,
+      canvas: scanCanvas,
+      inversion: s.inversion,
+      decoder: s.decoder,
+      onData: (text) => {
+        const frame = parseFrame(text);
+        if (frame) ingestFrame(frame);
+      },
+    });
+    // エンジン準備中に停止された場合は即破棄
+    if (!stream) { engine.stop(); return; }
+    scanEngine = engine;
+  }
+
+  // ---------- 受信スキャンエンジン ----------
+  // 送信側は一定間隔でQRを切り替えるので、受信側の解析回数が送信FPSを
+  // 十分に上回らないと取りこぼす。jsQR は1枚あたり数十〜数百ms掛かり、
+  // しかもメインスレッドを塞ぐため、以下の順で速いものを使う。
+  //   1. BarcodeDetector（端末内蔵。Android Chrome 等で高速・別スレッド）
+  //   2. jsQR を Web Worker で複数並列（CPUコア数に応じて解析回数が伸びる）
+  //   3. jsQR をメインスレッドで（Worker が使えない環境向けの最終手段）
+  // jsQR には映像中央の正方形だけを渡す（左右の余白を捨てて約3割速くなる）。
+
+  async function createBarcodeDetector() {
+    if (!('BarcodeDetector' in window)) return null;
+    try {
+      const formats = await window.BarcodeDetector.getSupportedFormats();
+      if (!formats.includes('qr_code')) return null;
+      return new window.BarcodeDetector({ formats: ['qr_code'] });
+    } catch {
+      return null;
+    }
+  }
+
+  async function startScanEngine({ video, canvas, inversion, decoder, onData }) {
+    let stopped = false;
+    let raf = null;
+    let analyzed = 0;
+    let mode = 'main';
+    let detector = null;
+    let workers = [];
+    const ctx = canvas.getContext('2d', { willReadFrequently: true });
+
+    function terminateWorkers() {
+      for (const slot of workers) { try { slot.w.terminate(); } catch {} }
+      workers = [];
+    }
+
+    function startWorkers() {
+      const n = Math.max(1, Math.min(3, (navigator.hardwareConcurrency || 2) - 1));
+      try {
+        for (let i = 0; i < n; i++) {
+          const w = new Worker('scan-worker.js');
+          const slot = { w, busy: false, dead: false };
+          w.onmessage = (ev) => {
+            slot.busy = false;
+            analyzed++;
+            if (!stopped && ev.data.data) onData(ev.data.data);
+          };
+          w.onerror = () => {
+            // 読み込み失敗など。全滅したらメインスレッドに切り替える
+            slot.dead = true;
+            slot.busy = false;
+            if (workers.every((x) => x.dead)) { terminateWorkers(); mode = 'main'; }
+          };
+          workers.push(slot);
         }
+        mode = 'worker';
+      } catch {
+        terminateWorkers();
+        mode = 'main';
       }
-      scanRaf = requestAnimationFrame(scan);
+    }
+
+    if (decoder !== 'jsqr') detector = await createBarcodeDetector();
+    if (detector) mode = 'native';
+    else startWorkers();
+
+    // 映像中央の正方形を切り出して画素を取る
+    function grabCenter() {
+      const w = video.videoWidth;
+      const h = video.videoHeight;
+      const S = Math.min(w, h);
+      if (canvas.width !== S) canvas.width = S;
+      if (canvas.height !== S) canvas.height = S;
+      ctx.drawImage(video, (w - S) >> 1, (h - S) >> 1, S, S, 0, 0, S, S);
+      return ctx.getImageData(0, 0, S, S);
+    }
+
+    let nativeBusy = false;
+    let lastVideoTime = -1;
+
+    const tick = () => {
+      if (stopped) return;
+      raf = requestAnimationFrame(tick);
+      if (video.readyState < video.HAVE_CURRENT_DATA || !video.videoWidth) return;
+      // 同じ映像フレームを二重に解析しない
+      if (video.currentTime === lastVideoTime) return;
+
+      if (mode === 'native') {
+        if (nativeBusy) return;
+        nativeBusy = true;
+        lastVideoTime = video.currentTime;
+        detector.detect(video).then((codes) => {
+          nativeBusy = false;
+          analyzed++;
+          if (stopped) return;
+          for (const c of codes) if (c.rawValue) onData(c.rawValue);
+        }).catch(() => {
+          // 内蔵デコーダが動かない端末だった。jsQR に切り替える
+          nativeBusy = false;
+          if (mode === 'native' && !stopped) { detector = null; startWorkers(); }
+        });
+        return;
+      }
+
+      if (mode === 'worker') {
+        const slot = workers.find((x) => !x.busy && !x.dead);
+        if (!slot) return;
+        lastVideoTime = video.currentTime;
+        const img = grabCenter();
+        slot.busy = true;
+        slot.w.postMessage(
+          { buf: img.data.buffer, w: img.width, h: img.height, inversion },
+          [img.data.buffer]
+        );
+        return;
+      }
+
+      lastVideoTime = video.currentTime;
+      const img = grabCenter();
+      const code = jsQR(img.data, img.width, img.height, { inversionAttempts: inversion });
+      analyzed++;
+      if (code && code.data) onData(code.data);
     };
-    scanRaf = requestAnimationFrame(scan);
+    raf = requestAnimationFrame(tick);
+
+    // 1秒ごとに解析回数を表示（送信側FPSをこれより十分低くすると取りこぼしにくい）
+    const label = () => (mode === 'native' ? '内蔵'
+      : mode === 'worker' ? `jsQR×${workers.filter((x) => !x.dead).length}` : 'jsQR');
+    recvScanRate.textContent = `解析 —回/秒（${label()}）`;
+    recvScanRate.hidden = false;
+    const rateTimer = setInterval(() => {
+      recvScanRate.textContent = `解析 ${analyzed}回/秒（${label()}）`;
+      analyzed = 0;
+    }, 1000);
+
+    return {
+      stop() {
+        if (stopped) return;
+        stopped = true;
+        if (raf) cancelAnimationFrame(raf);
+        clearInterval(rateTimer);
+        terminateWorkers();
+        recvScanRate.hidden = true;
+        recvScanRate.textContent = '';
+      },
+    };
   }
 
   function stopRecv() {
-    if (scanRaf) cancelAnimationFrame(scanRaf);
-    scanRaf = null;
+    if (scanEngine) { scanEngine.stop(); scanEngine = null; }
+
     releaseWakeLock('recv');
     if (stream) {
       stream.getTracks().forEach((t) => t.stop());
       stream = null;
     }
     cam.srcObject = null;
+    cam.parentElement.classList.remove('is-live');
     hideRecvFrameNo();
     btnRecvStart.disabled = false;
     btnRecvStop.disabled = true;
@@ -1795,8 +2272,8 @@
   });
 
   btnCopyMissing.addEventListener('click', async () => {
-    const txt = recvMissingList.textContent;
-    if (!txt || txt.startsWith('（')) return;
+    const txt = recvMissingText;
+    if (!txt) return;
     try {
       await navigator.clipboard.writeText(txt);
       const old = btnCopyMissing.textContent;
@@ -1820,7 +2297,7 @@
   // ---------- QR bridge (missing-range side-channel) --------------------
   // The receiver shows its missing-range as a small QR, the sender does a
   // one-shot scan of it. Uses its own canvas/video/stream — never touches
-  // sendTimer, scanRaf, or the module-level `stream` — so the main
+  // sendTimer, scanEngine, or the module-level `stream` — so the main
   // send/receive loops on both devices keep running underneath.
 
   let qrBridgeStream = null;
@@ -1876,8 +2353,8 @@
   btnQrBridgeClose.addEventListener('click', () => closeQrBridge());
 
   btnShowMissingQr.addEventListener('click', () => {
-    const txt = recvMissingList.textContent;
-    if (!txt || txt.startsWith('（')) return;
+    const txt = recvMissingText;
+    if (!txt) return;
     qrBridgeModal.hidden = false;
     qrBridgeShowWrap.hidden = false;
     qrBridgeScanWrap.hidden = true;
@@ -2062,6 +2539,7 @@
     applySendMode(currentSendMode());
     lastUpdated.textContent = LAST_UPDATED;
     refreshSendFileInfo();
+    refreshTextInfo();
     resetRecvState();
     if (!isSecureCameraContext()) httpsWarn.hidden = false;
   }

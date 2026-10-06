@@ -22,6 +22,8 @@
 
     <!-- =========================== Send =========================== -->
     <section id="paneSend" class="pane is-active" role="tabpanel">
+      <!-- 送信中は畳んで、QRが画面内に収まるようにする -->
+      <div id="sendSetup">
       <div class="mode-row" role="tablist" aria-label="送信モード">
         <button type="button" class="mode-opt is-active" data-mode="text" role="tab" aria-selected="true">テキスト</button>
         <button type="button" class="mode-opt" data-mode="file" role="tab" aria-selected="false">ファイル</button>
@@ -33,6 +35,7 @@
           <span class="field-label">送信テキスト</span>
           <textarea id="sendInput" placeholder="ここに送信するテキストを入力" rows="6"></textarea>
         </label>
+        <div id="sendTextInfo" class="hint"></div>
       </div>
 
       <div data-mode-panel="file" class="mode-panel" hidden>
@@ -88,11 +91,25 @@
 
         <p class="hint">「QR表示開始」を押すと <code>api.github.com</code> からファイルを取得し、zip にまとめて送信します。公開リポジトリのみ。</p>
       </div>
+      </div>
+
+      <div id="sendSummary" class="send-summary" hidden></div>
 
       <div class="row">
         <button id="btnSendStart" class="btn primary">QR表示開始</button>
         <button id="btnSendStop" class="btn" disabled>停止</button>
         <span id="sendStatus" class="status">待機中</span>
+      </div>
+      <div id="sendStage" class="send-stage">
+        <div class="qr-wrap">
+          <canvas id="qrCanvas" width="320" height="320"></canvas>
+        </div>
+        <div class="row transport-row">
+          <button id="btnSendPrev" class="btn btn-hold" disabled title="1つ前のチャンクへ（押し続けると連続で戻ります）">⏪ 巻き戻し</button>
+          <span id="sendFrameNo" class="frame-no" aria-live="off">— / —</span>
+          <button id="btnSendNext" class="btn btn-hold" disabled title="1つ次のチャンクへ（押し続けると連続で進みます）">⏩ 早送り</button>
+          <button id="btnSendFocus" class="btn" disabled aria-label="全画面表示" title="QRを画面いっぱいに表示（離れた位置からでも読み取りやすくなります）">⛶</button>
+        </div>
       </div>
       <div class="row range-row">
         <label class="range-label" for="sendRange">範囲指定</label>
@@ -102,19 +119,15 @@
         <button id="btnScanRange" class="btn btn-sm" title="受信端末が表示するQRを読み取って自動入力">📷 QRで受け取る</button>
         <button id="btnRangeApply" class="btn btn-sm">反映</button>
       </div>
-      <div class="qr-wrap">
-        <canvas id="qrCanvas" width="320" height="320"></canvas>
-      </div>
-      <div class="row transport-row">
-        <button id="btnSendPrev" class="btn btn-hold" disabled title="1つ前のチャンクへ（押し続けると連続で戻ります）">⏪ 巻き戻し</button>
-        <span id="sendFrameNo" class="frame-no" aria-live="off">— / —</span>
-        <button id="btnSendNext" class="btn btn-hold" disabled title="1つ次のチャンクへ（押し続けると連続で進みます）">⏩ 早送り</button>
-      </div>
       <p class="hint">受信側のカメラでこのQRを連続スキャンしてください。1周完了後もループするので途中参加でもOKです。</p>
     </section>
 
     <!-- =========================== Receive =========================== -->
     <section id="paneRecv" class="pane" role="tabpanel" hidden>
+      <p id="httpsWarn" class="warn" hidden>
+        カメラ起動には HTTPS または <code>http://localhost</code> が必要です。
+        現在のURLでは <code>getUserMedia</code> が使えない可能性があります。
+      </p>
       <div class="row">
         <button id="btnRecvStart" class="btn primary">カメラ開始</button>
         <button id="btnRecvStop" class="btn" disabled>停止</button>
@@ -124,6 +137,10 @@
         <video id="cam" playsinline muted autoplay></video>
         <canvas id="scanCanvas" hidden></canvas>
         <div id="recvFrameNo" class="cam-frame-no" hidden></div>
+        <div id="recvScanRate" class="cam-scan-rate" hidden></div>
+      </div>
+      <div class="row recv-cam-actions">
+        <button id="btnShowMissingQr" class="btn btn-sm" disabled title="未受信番号をQRコードで送信端末に見せる">📱 QRで送る</button>
       </div>
       <div class="recv-status">
         <progress id="recvProgress" value="0" max="1"></progress>
@@ -132,10 +149,9 @@
       <div id="recvGrid" class="grid" aria-label="受信済みチャンク"></div>
 
       <div class="missing-row" id="recvMissingRow" hidden>
-        <span class="missing-label">未受信:</span>
+        <span class="missing-label">未受信<span id="recvMissingCount"></span>:</span>
         <code id="recvMissingList" class="missing-list">—</code>
         <button id="btnCopyMissing" class="btn btn-sm" disabled>コピー</button>
-        <button id="btnShowMissingQr" class="btn btn-sm" disabled title="未受信番号をQRコードで送信端末に見せる">📱 QRで送る</button>
       </div>
 
       <div id="recvResult" class="recv-result" hidden>
@@ -149,11 +165,6 @@
           <textarea id="recvOutput" rows="6" readonly placeholder="（受信中…）"></textarea>
         </label>
       </div>
-
-      <p id="httpsWarn" class="warn" hidden>
-        カメラ起動には HTTPS または <code>http://localhost</code> が必要です。
-        現在のURLでは <code>getUserMedia</code> が使えない可能性があります。
-      </p>
     </section>
 
     <!-- =========================== Settings =========================== -->
@@ -161,9 +172,18 @@
       <h2>送信側の設定</h2>
 
       <label class="field">
-        <span class="field-label">1チャンクのサイズ（バイト）<output id="outChunkSize">800</output></span>
+        <span class="field-label">送信形式</span>
+        <select id="cfgProtocol">
+          <option value="v3" selected>新形式（推奨：圧縮あり・高速）</option>
+          <option value="v2">旧形式（互換：旧バージョンの受信側でも読める）</option>
+        </select>
+        <small class="hint">受信側の画面下の「最終更新」が 2026-09-28 以前（または表示が無い）なら旧形式を選んでください。旧形式は圧縮せず base64 で送るため、同じデータでも枚数が 1.3〜4 倍ほどに増えます。最新の受信側はどちらの形式も読めます。</small>
+      </label>
+
+      <label class="field">
+        <span class="field-label">QR1枚の容量（バイト換算）<output id="outChunkSize">800</output></span>
         <input id="cfgChunkSize" type="range" min="100" max="2000" step="50" value="800">
-        <small class="hint">QR1枚に詰めるbase64ペイロード長。小さいほど読みやすいが枚数が増えます。</small>
+        <small class="hint">QRの細かさを決めます。大きいほど枚数が減って速く送れますが、QRが細かくなり読み取りにくくなります。1枚に載る実データは、新形式でこの値の約0.97倍、旧形式で約0.75倍です。</small>
       </label>
 
       <label class="field">
@@ -220,6 +240,15 @@
           <option value="1280">1280 × 720（高精細）</option>
         </select>
         <small class="hint">高解像度ほどCPU負荷が上がりますが小さなQRも読めます。</small>
+      </label>
+
+      <label class="field">
+        <span class="field-label">読み取りエンジン</span>
+        <select id="cfgDecoder">
+          <option value="auto" selected>自動（端末内蔵の高速デコーダを優先）</option>
+          <option value="jsqr">jsQR のみ</option>
+        </select>
+        <small class="hint">内蔵デコーダ（BarcodeDetector）が無い端末では jsQR を並列ワーカーで動かします。読み取りが不安定なときは「jsQR のみ」を試してください。</small>
       </label>
 
       <label class="field">
