@@ -11,7 +11,7 @@
   const STORAGE_KEY = 'qrtt.settings.v1';
   // フッタに出す最終更新日。ビルド工程が無い（index.html を直接開ける）ので
   // 自動埋め込みができない。内容を変更したらここも更新すること。
-  const LAST_UPDATED = '2026-09-28';
+  const LAST_UPDATED = '2026-10-06';
   const LARGE_TRANSFER_BYTES = 2 * 1024 * 1024; // 2 MB confirm threshold
 
   const DEFAULT_SETTINGS = {
@@ -24,6 +24,7 @@
     facing: 'environment',
     resolution: 640,
     inversion: 'dontInvert',
+    decoder: 'auto',
     imgCompress: '50',
   };
 
@@ -78,6 +79,7 @@
   const btnRecvReset = $('btnRecvReset');
   const cam = $('cam');
   const recvFrameNo = $('recvFrameNo');
+  const recvScanRate = $('recvScanRate');
   const scanCanvas = $('scanCanvas');
   const recvProgress = $('recvProgress');
   const recvStatus = $('recvStatus');
@@ -115,6 +117,7 @@
     facing: $('cfgFacing'),
     resolution: $('cfgResolution'),
     inversion: $('cfgInversion'),
+    decoder: $('cfgDecoder'),
     imgCompress: $('cfgImgCompress'),
   };
   const imgCompressField = $('imgCompressField');
@@ -178,6 +181,7 @@
       facing: cfg.facing.value,
       resolution: +cfg.resolution.value,
       inversion: cfg.inversion.value,
+      decoder: cfg.decoder.value,
       imgCompress: cfg.imgCompress.value,
     };
   }
@@ -192,6 +196,7 @@
     cfg.facing.value = s.facing;
     cfg.resolution.value = s.resolution;
     cfg.inversion.value = s.inversion;
+    cfg.decoder.value = s.decoder;
     cfg.imgCompress.value = s.imgCompress;
     updateOutputs();
   }
@@ -1515,7 +1520,7 @@
   // ----------------------------------------------------------------------
 
   let stream = null;
-  let scanRaf = null;
+  let scanEngine = null;
   let recvState = null;
   let recvBlobUrl = null;
   let recvFilename = null;
@@ -1570,6 +1575,17 @@
     recvFrameNo.classList.remove('is-new');
     recvFrameNo.hidden = true;
     recvFrameNo.textContent = '';
+  }
+
+  // 未受信リストの再計算は総数に比例するので、読み取りのたびではなく
+  // 描画1回につき1度にまとめる（スキャン処理の邪魔をしない）。
+  let missingDisplayRaf = null;
+  function scheduleMissingDisplay() {
+    if (missingDisplayRaf) return;
+    missingDisplayRaf = requestAnimationFrame(() => {
+      missingDisplayRaf = null;
+      updateMissingDisplay();
+    });
   }
 
   function updateMissingDisplay() {
@@ -1633,7 +1649,7 @@
       `セッション ${recvState.sessionId} : ${recvState.gotCount} / ${recvState.total} 受信`;
     const cell = recvGrid.children[frame.index];
     if (cell) cell.classList.add('got');
-    updateMissingDisplay();
+    scheduleMissingDisplay();
 
     if (recvState.gotCount === recvState.total) {
       try {
@@ -1733,30 +1749,170 @@
     // 転送そのものが止まるので、送信側と同じくロックを取る。
     requestWakeLock('recv');
 
-    const ctx = scanCanvas.getContext('2d', { willReadFrequently: true });
-    const scan = () => {
-      if (!stream) return;
-      if (cam.readyState >= cam.HAVE_CURRENT_DATA && cam.videoWidth > 0) {
-        const w = cam.videoWidth;
-        const h = cam.videoHeight;
-        if (scanCanvas.width !== w) scanCanvas.width = w;
-        if (scanCanvas.height !== h) scanCanvas.height = h;
-        ctx.drawImage(cam, 0, 0, w, h);
-        const img = ctx.getImageData(0, 0, w, h);
-        const code = jsQR(img.data, w, h, { inversionAttempts: s.inversion });
-        if (code && code.data) {
-          const frame = parseFrame(code.data);
-          if (frame) ingestFrame(frame);
+    const engine = await startScanEngine({
+      video: cam,
+      canvas: scanCanvas,
+      inversion: s.inversion,
+      decoder: s.decoder,
+      onData: (text) => {
+        const frame = parseFrame(text);
+        if (frame) ingestFrame(frame);
+      },
+    });
+    // エンジン準備中に停止された場合は即破棄
+    if (!stream) { engine.stop(); return; }
+    scanEngine = engine;
+  }
+
+  // ---------- 受信スキャンエンジン ----------
+  // 送信側は一定間隔でQRを切り替えるので、受信側の解析回数が送信FPSを
+  // 十分に上回らないと取りこぼす。jsQR は1枚あたり数十〜数百ms掛かり、
+  // しかもメインスレッドを塞ぐため、以下の順で速いものを使う。
+  //   1. BarcodeDetector（端末内蔵。Android Chrome 等で高速・別スレッド）
+  //   2. jsQR を Web Worker で複数並列（CPUコア数に応じて解析回数が伸びる）
+  //   3. jsQR をメインスレッドで（Worker が使えない環境向けの最終手段）
+  // jsQR には映像中央の正方形だけを渡す（左右の余白を捨てて約3割速くなる）。
+
+  async function createBarcodeDetector() {
+    if (!('BarcodeDetector' in window)) return null;
+    try {
+      const formats = await window.BarcodeDetector.getSupportedFormats();
+      if (!formats.includes('qr_code')) return null;
+      return new window.BarcodeDetector({ formats: ['qr_code'] });
+    } catch {
+      return null;
+    }
+  }
+
+  async function startScanEngine({ video, canvas, inversion, decoder, onData }) {
+    let stopped = false;
+    let raf = null;
+    let analyzed = 0;
+    let mode = 'main';
+    let detector = null;
+    let workers = [];
+    const ctx = canvas.getContext('2d', { willReadFrequently: true });
+
+    function terminateWorkers() {
+      for (const slot of workers) { try { slot.w.terminate(); } catch {} }
+      workers = [];
+    }
+
+    function startWorkers() {
+      const n = Math.max(1, Math.min(3, (navigator.hardwareConcurrency || 2) - 1));
+      try {
+        for (let i = 0; i < n; i++) {
+          const w = new Worker('scan-worker.js');
+          const slot = { w, busy: false, dead: false };
+          w.onmessage = (ev) => {
+            slot.busy = false;
+            analyzed++;
+            if (!stopped && ev.data.data) onData(ev.data.data);
+          };
+          w.onerror = () => {
+            // 読み込み失敗など。全滅したらメインスレッドに切り替える
+            slot.dead = true;
+            slot.busy = false;
+            if (workers.every((x) => x.dead)) { terminateWorkers(); mode = 'main'; }
+          };
+          workers.push(slot);
         }
+        mode = 'worker';
+      } catch {
+        terminateWorkers();
+        mode = 'main';
       }
-      scanRaf = requestAnimationFrame(scan);
+    }
+
+    if (decoder !== 'jsqr') detector = await createBarcodeDetector();
+    if (detector) mode = 'native';
+    else startWorkers();
+
+    // 映像中央の正方形を切り出して画素を取る
+    function grabCenter() {
+      const w = video.videoWidth;
+      const h = video.videoHeight;
+      const S = Math.min(w, h);
+      if (canvas.width !== S) canvas.width = S;
+      if (canvas.height !== S) canvas.height = S;
+      ctx.drawImage(video, (w - S) >> 1, (h - S) >> 1, S, S, 0, 0, S, S);
+      return ctx.getImageData(0, 0, S, S);
+    }
+
+    let nativeBusy = false;
+    let lastVideoTime = -1;
+
+    const tick = () => {
+      if (stopped) return;
+      raf = requestAnimationFrame(tick);
+      if (video.readyState < video.HAVE_CURRENT_DATA || !video.videoWidth) return;
+      // 同じ映像フレームを二重に解析しない
+      if (video.currentTime === lastVideoTime) return;
+
+      if (mode === 'native') {
+        if (nativeBusy) return;
+        nativeBusy = true;
+        lastVideoTime = video.currentTime;
+        detector.detect(video).then((codes) => {
+          nativeBusy = false;
+          analyzed++;
+          if (stopped) return;
+          for (const c of codes) if (c.rawValue) onData(c.rawValue);
+        }).catch(() => {
+          // 内蔵デコーダが動かない端末だった。jsQR に切り替える
+          nativeBusy = false;
+          if (mode === 'native' && !stopped) { detector = null; startWorkers(); }
+        });
+        return;
+      }
+
+      if (mode === 'worker') {
+        const slot = workers.find((x) => !x.busy && !x.dead);
+        if (!slot) return;
+        lastVideoTime = video.currentTime;
+        const img = grabCenter();
+        slot.busy = true;
+        slot.w.postMessage(
+          { buf: img.data.buffer, w: img.width, h: img.height, inversion },
+          [img.data.buffer]
+        );
+        return;
+      }
+
+      lastVideoTime = video.currentTime;
+      const img = grabCenter();
+      const code = jsQR(img.data, img.width, img.height, { inversionAttempts: inversion });
+      analyzed++;
+      if (code && code.data) onData(code.data);
     };
-    scanRaf = requestAnimationFrame(scan);
+    raf = requestAnimationFrame(tick);
+
+    // 1秒ごとに解析回数を表示（送信側FPSをこれより十分低くすると取りこぼしにくい）
+    const label = () => (mode === 'native' ? '内蔵'
+      : mode === 'worker' ? `jsQR×${workers.filter((x) => !x.dead).length}` : 'jsQR');
+    recvScanRate.textContent = `解析 —回/秒（${label()}）`;
+    recvScanRate.hidden = false;
+    const rateTimer = setInterval(() => {
+      recvScanRate.textContent = `解析 ${analyzed}回/秒（${label()}）`;
+      analyzed = 0;
+    }, 1000);
+
+    return {
+      stop() {
+        if (stopped) return;
+        stopped = true;
+        if (raf) cancelAnimationFrame(raf);
+        clearInterval(rateTimer);
+        terminateWorkers();
+        recvScanRate.hidden = true;
+        recvScanRate.textContent = '';
+      },
+    };
   }
 
   function stopRecv() {
-    if (scanRaf) cancelAnimationFrame(scanRaf);
-    scanRaf = null;
+    if (scanEngine) { scanEngine.stop(); scanEngine = null; }
+
     releaseWakeLock('recv');
     if (stream) {
       stream.getTracks().forEach((t) => t.stop());
@@ -1820,7 +1976,7 @@
   // ---------- QR bridge (missing-range side-channel) --------------------
   // The receiver shows its missing-range as a small QR, the sender does a
   // one-shot scan of it. Uses its own canvas/video/stream — never touches
-  // sendTimer, scanRaf, or the module-level `stream` — so the main
+  // sendTimer, scanEngine, or the module-level `stream` — so the main
   // send/receive loops on both devices keep running underneath.
 
   let qrBridgeStream = null;

@@ -248,6 +248,26 @@ input[type=range] {
   transition: background 0.2s;
 }
 .cam-frame-no[hidden] { display: none; }
+
+/* カメラ映像の右下：1秒あたりに解析できたフレーム数（送信FPSの目安） */
+.cam-scan-rate {
+  position: absolute;
+  right: 8px;
+  bottom: 8px;
+  z-index: 1;
+  padding: 2px 8px;
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.55);
+  color: #fff;
+  font-size: 0.8rem;
+  font-variant-numeric: tabular-nums;
+  pointer-events: none;
+}
+.cam-scan-rate[hidden] { display: none; }
+
+.recv-cam-actions {
+  margin-top: -4px;
+}
 .cam-frame-no.is-new { background: rgba(46, 160, 67, 0.85); }
 
 .range-row {
