@@ -27,6 +27,7 @@
     inversion: 'dontInvert',
     decoder: 'auto',
     imgCompress: '50',
+    protocol: 'v3',
   };
 
   // ----------------------------------------------------------------------
@@ -126,6 +127,7 @@
     inversion: $('cfgInversion'),
     decoder: $('cfgDecoder'),
     imgCompress: $('cfgImgCompress'),
+    protocol: $('cfgProtocol'),
   };
   const imgCompressField = $('imgCompressField');
   const out = {
@@ -149,6 +151,7 @@
     const v = s.imgCompress;
     if (LEGACY_IMG_COMPRESS[v]) s.imgCompress = LEGACY_IMG_COMPRESS[v];
     else if (v !== 'none' && !IMG_SCALES[v]) s.imgCompress = DEFAULT_SETTINGS.imgCompress;
+    if (s.protocol !== 'v3' && s.protocol !== 'v2') s.protocol = DEFAULT_SETTINGS.protocol;
     return s;
   }
 
@@ -190,6 +193,7 @@
       inversion: cfg.inversion.value,
       decoder: cfg.decoder.value,
       imgCompress: cfg.imgCompress.value,
+      protocol: cfg.protocol.value,
     };
   }
 
@@ -205,6 +209,7 @@
     cfg.inversion.value = s.inversion;
     cfg.decoder.value = s.decoder;
     cfg.imgCompress.value = s.imgCompress;
+    cfg.protocol.value = s.protocol;
     updateOutputs();
   }
 
@@ -556,6 +561,30 @@
       frames.push(`${PROTOCOL_V3_TAG}:${sessionId}:${i}:${total}:${payload}`);
     }
     return { frames, sessionId, total };
+  }
+
+  // 旧形式（QRT2）。旧バージョンの受信側はこれしか読めないので互換用に残す。
+  // 圧縮せず、送るデータ全体を base64 にしてバイトモードで送る。chunkSize は
+  // そのまま1枚あたりの base64 文字数（= QR のバイト数）になる。
+  // セッションIDは新形式と同じく中身から決める（旧受信側は任意の文字列を
+  // 受け付ける）ので、最新の受信側なら送信を再開しても途中経過を引き継げる。
+  function encodeFramesLegacy(blob, chunkSize) {
+    const b64 = bytesToBase64(blob);
+    const total = Math.max(1, Math.ceil(b64.length / chunkSize));
+    const sessionId = fnv1a(blob, chunkSize).toString(36);
+    const frames = [];
+    for (let i = 0; i < total; i++) {
+      const payload = b64.slice(i * chunkSize, (i + 1) * chunkSize);
+      frames.push(`${PROTOCOL_TAG}|${sessionId}|${i}|${total}|${payload}`);
+    }
+    return { frames, sessionId, total };
+  }
+
+  // 送信形式に応じて、実際に送るバイト列を用意する。旧形式は圧縮しない
+  // （旧受信側は先頭の形式バイトも deflate も知らない）。
+  function prepareWire(blob, manifest, protocol) {
+    if (protocol === 'v2') return { wire: blob, compressed: false };
+    return buildWireBytes(blob, shouldCompress(manifest));
   }
 
   // 読み取った文字列を { version, sessionId, index, total, payload } にする。
@@ -1260,12 +1289,13 @@
     if (!text) { sendTextInfo.textContent = ''; return; }
     const body = new TextEncoder().encode(text);
     const blob = buildBlobBytes({ kind: 'text', name: 'message.txt' }, body);
-    const { wire, compressed } = buildWireBytes(blob, true);
     const s = settingsFromInputs();
+    const { wire, compressed } = prepareWire(blob, { kind: 'text' }, s.protocol);
     const frames = estimateFrames(wire.length, s.chunkSize);
     sendTextInfo.textContent =
       `${formatBytes(body.length)}${compressed ? ` → 圧縮後 ${formatBytes(wire.length)}` : ''}`
-      + ` ｜ ${frames}枚 ｜ 推定 ${formatDuration(estimateSeconds(wire.length, s.chunkSize, s.fps))}`;
+      + ` ｜ ${frames}枚 ｜ 推定 ${formatDuration(estimateSeconds(wire.length, s.chunkSize, s.fps))}`
+      + (s.protocol === 'v2' ? ' ｜ 旧形式' : '');
   }
 
   sendInput.addEventListener('input', scheduleTextInfo);
@@ -1339,7 +1369,8 @@
     throw new Error(`不明なモード: ${mode}`);
   }
 
-  function estimateFrames(bytes, chunkSize) {
+  function estimateFrames(bytes, chunkSize, protocol = cfg.protocol.value) {
+    if (protocol === 'v2') return Math.max(1, Math.ceil((Math.ceil(bytes / 3) * 4) / chunkSize));
     return Math.max(1, Math.ceil(bytes / rawBytesPerFrame(chunkSize)));
   }
 
@@ -1616,7 +1647,8 @@
     sendStatus.textContent = '準備中…';
     // 大きいファイルの圧縮は同期処理で数百msかかるので、先に表示を更新させる
     await new Promise((r) => setTimeout(r, 0));
-    const { wire, compressed } = buildWireBytes(blob, shouldCompress(gathered.manifest));
+    const legacy = s.protocol === 'v2';
+    const { wire, compressed } = prepareWire(blob, gathered.manifest, s.protocol);
     const eta = estimateSeconds(wire.length, s.chunkSize, s.fps);
     const sizeLabel = compressed
       ? `${formatBytes(wire.length)}（圧縮前 ${formatBytes(blob.length)}）`
@@ -1638,7 +1670,9 @@
 
     let frames;
     try {
-      frames = encodeFrames(wire, s.chunkSize).frames;
+      frames = legacy
+        ? encodeFramesLegacy(wire, s.chunkSize).frames
+        : encodeFrames(wire, s.chunkSize).frames;
     } catch (err) {
       sendStatus.textContent = `フレーム生成エラー: ${err.message}`;
       btnSendStart.disabled = false;
@@ -1650,7 +1684,7 @@
     let typeNumber = s.typeNumber;
     if (typeNumber === 0) {
       try {
-        typeNumber = resolveTypeNumber(frames, s.ecc, 'Alphanumeric');
+        typeNumber = resolveTypeNumber(frames, s.ecc, legacy ? 'Byte' : 'Alphanumeric');
       } catch (err) {
         sendStatus.textContent = `QR生成エラー: ${err.message}（チャンクサイズを下げてください）`;
         btnSendStart.disabled = false;
@@ -1661,7 +1695,8 @@
     }
 
     sendRenderOpts = {
-      typeNumber, ecc: s.ecc, cellSize: s.cellSize, margin: s.margin, mode: 'Alphanumeric',
+      typeNumber, ecc: s.ecc, cellSize: s.cellSize, margin: s.margin,
+      mode: legacy ? 'Byte' : 'Alphanumeric',
     };
     sendTickMs = Math.max(50, Math.round(1000 / s.fps));
     sendMeta = { kind: gathered.manifest.kind, sizeLabel };
@@ -1669,7 +1704,8 @@
     const KIND_LABEL = { text: 'テキスト', file: 'ファイル', repo: 'リポジトリ' };
     sendSummary.textContent =
       `${KIND_LABEL[gathered.manifest.kind] || gathered.manifest.kind}：${gathered.manifest.name}`
-      + ` ｜ ${sizeLabel} ｜ ${frames.length}枚 ｜ 1周 約${formatDuration(Math.max(1, Math.ceil(frames.length / s.fps)))}`;
+      + ` ｜ ${sizeLabel} ｜ ${frames.length}枚 ｜ 1周 約${formatDuration(Math.max(1, Math.ceil(frames.length / s.fps)))}`
+      + (legacy ? ' ｜ 旧形式（互換）' : '');
 
     // Honor any pre-filled range; fall back to all on parse error
     if (!applyRangeFromInput()) {
