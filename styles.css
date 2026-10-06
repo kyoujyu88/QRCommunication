@@ -150,6 +150,14 @@ input[type=range] {
   justify-content: center;
 }
 
+/* 巻き戻し/早送りの間に出す、表示中QRの番号 */
+.frame-no {
+  min-width: 7em;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+}
+
 .btn.primary {
   background: var(--accent);
   color: var(--accent-fg);
@@ -222,6 +230,25 @@ input[type=range] {
   position: relative;
   z-index: 0;
 }
+
+/* カメラ映像の左上に重ねる、直近に読み取ったQRの番号 */
+.cam-frame-no {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  z-index: 1;
+  padding: 4px 10px;
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.6);
+  color: #fff;
+  font-size: 1rem;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  pointer-events: none;
+  transition: background 0.2s;
+}
+.cam-frame-no[hidden] { display: none; }
+.cam-frame-no.is-new { background: rgba(46, 160, 67, 0.85); }
 
 .range-row {
   align-items: center;
@@ -432,7 +459,7 @@ code {
 }
 
 .qr-wrap-sm {
-  max-width: 240px;
+  max-width: 320px;
   padding: 12px;
   margin: 0 auto 12px;
 }
@@ -449,6 +476,8 @@ code {
   max-width: 320px;
   margin: 0 auto 12px;
 }
+
+.qr-bridge-part[hidden] { display: none; }
 
 .modal .status {
   display: block;

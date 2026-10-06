@@ -7,6 +7,7 @@
 
   const PROTOCOL_TAG = 'QRT2';
   const MISSING_QR_TAG = 'QRTM'; // missing-range side-channel, distinct from data frames
+  const MISSING_QR_MULTI_TAG = 'QRTN'; // same, split across several cycling QRs
   const STORAGE_KEY = 'qrtt.settings.v1';
   // フッタに出す最終更新日。ビルド工程が無い（index.html を直接開ける）ので
   // 自動埋め込みができない。内容を変更したらここも更新すること。
@@ -55,6 +56,7 @@
   const btnSendStop = $('btnSendStop');
   const btnSendPrev = $('btnSendPrev');
   const btnSendNext = $('btnSendNext');
+  const sendFrameNo = $('sendFrameNo');
   const sendStatus = $('sendStatus');
   const qrCanvas = $('qrCanvas');
   const sendRange = $('sendRange');
@@ -75,6 +77,7 @@
   const btnRecvStop = $('btnRecvStop');
   const btnRecvReset = $('btnRecvReset');
   const cam = $('cam');
+  const recvFrameNo = $('recvFrameNo');
   const scanCanvas = $('scanCanvas');
   const recvProgress = $('recvProgress');
   const recvStatus = $('recvStatus');
@@ -96,6 +99,7 @@
   const qrBridgeStatus = $('qrBridgeStatus');
   const qrBridgeShowWrap = $('qrBridgeShowWrap');
   const qrBridgeCanvas = $('qrBridgeCanvas');
+  const qrBridgePart = $('qrBridgePart');
   const qrBridgeScanWrap = $('qrBridgeScanWrap');
   const qrBridgeVideo = $('qrBridgeVideo');
   const qrBridgeScanCanvas = $('qrBridgeScanCanvas');
@@ -1299,6 +1303,7 @@
       : ` ｜ 範囲 ${sendActive.length}枚`;
     sendStatus.textContent =
       `[${sendMeta.kind}] ${realIdx + 1} / ${total}${subsetLabel} ｜ ${sendMeta.sizeLabel} ｜ loop`;
+    sendFrameNo.textContent = `${realIdx + 1} / ${total}`;
     sendIndex = (sendIndex + 1) % sendActive.length;
   }
 
@@ -1474,6 +1479,7 @@
     }
     sendAllFrames = [];
     sendActive = [];
+    sendFrameNo.textContent = '— / —';
   }
 
   btnRangeApply.addEventListener('click', () => {
@@ -1540,6 +1546,30 @@
     recvMissingList.textContent = '—';
     btnCopyMissing.disabled = true;
     btnShowMissingQr.disabled = true;
+    hideRecvFrameNo();
+  }
+
+  // ---------- 読み取り中のQR番号（カメラ映像に重ねて表示） ----------
+  // 重複フレームも含め、読めた瞬間の番号を出す。新規受信のときだけ一瞬
+  // 色を変えて「今のは取れた」が分かるようにする。
+  let recvFrameNoFlash = null;
+
+  function showRecvFrameNo(frame, isNew) {
+    recvFrameNo.textContent = `#${frame.index + 1} / ${frame.total}`;
+    recvFrameNo.hidden = false;
+    if (isNew) {
+      recvFrameNo.classList.add('is-new');
+      clearTimeout(recvFrameNoFlash);
+      recvFrameNoFlash = setTimeout(() => recvFrameNo.classList.remove('is-new'), 300);
+    }
+  }
+
+  function hideRecvFrameNo() {
+    clearTimeout(recvFrameNoFlash);
+    recvFrameNoFlash = null;
+    recvFrameNo.classList.remove('is-new');
+    recvFrameNo.hidden = true;
+    recvFrameNo.textContent = '';
   }
 
   function updateMissingDisplay() {
@@ -1593,7 +1623,9 @@
     if (!recvState || recvState.sessionId !== frame.sessionId || recvState.total !== frame.total) {
       initRecvSession(frame.sessionId, frame.total);
     }
-    if (recvState.chunks[frame.index] != null) return;
+    const isNew = recvState.chunks[frame.index] == null;
+    showRecvFrameNo(frame, isNew);
+    if (!isNew) return;
     recvState.chunks[frame.index] = frame.payload;
     recvState.gotCount += 1;
     recvProgress.value = recvState.gotCount;
@@ -1731,6 +1763,7 @@
       stream = null;
     }
     cam.srcObject = null;
+    hideRecvFrameNo();
     btnRecvStart.disabled = false;
     btnRecvStop.disabled = true;
     if (recvState && recvState.gotCount < recvState.total) {
@@ -1792,9 +1825,43 @@
 
   let qrBridgeStream = null;
   let qrBridgeRaf = null;
+  let qrBridgeShowTimer = null;
+
+  // 1枚のQRに収めるメッセージ長。これを超える未受信リストは複数枚に分けて
+  // 順に切り替えて表示する（1枚に詰めると容量超過で生成できないか、
+  // 密度が高すぎて小さなモーダルでは読めなくなる）。
+  const QR_BRIDGE_PART_LEN = 300;
+  const QR_BRIDGE_PART_MS = 400;
+
+  // 未受信番号を短い文字列にする。範囲表記（"r..."）と、未受信ビットマップを
+  // deflate して base64 にしたもの（"b<total>:..."）の短い方を使う。
+  // 飛び飛びの欠落が大量にあると範囲表記は数万文字になるが、ビットマップは
+  // 総数/8 バイト以下に収まる。
+  function encodeMissingMessage(missing, total) {
+    const rangeMsg = 'r' + formatIndexRanges(missing);
+    const bits = new Uint8Array(Math.ceil(total / 8));
+    for (const i of missing) bits[i >> 3] |= 1 << (i & 7);
+    const bitmapMsg = `b${total}:` + bytesToBase64(fflate.deflateSync(bits, { level: 9 }));
+    return bitmapMsg.length < rangeMsg.length ? bitmapMsg : rangeMsg;
+  }
+
+  function decodeMissingMessage(msg) {
+    if (msg[0] === 'r') return msg.slice(1);
+    const m = msg.match(/^b(\d+):(.*)$/);
+    if (!m) throw new Error('未知の形式です');
+    const total = +m[1];
+    const bits = fflate.inflateSync(base64ToBytes(m[2]));
+    const missing = [];
+    for (let i = 0; i < total; i++) {
+      if (bits[i >> 3] & (1 << (i & 7))) missing.push(i);
+    }
+    return formatIndexRanges(missing);
+  }
 
   function closeQrBridge() {
     releaseWakeLock('qrbridge');
+    if (qrBridgeShowTimer) { clearInterval(qrBridgeShowTimer); qrBridgeShowTimer = null; }
+    qrBridgePart.hidden = true;
     if (qrBridgeRaf) { cancelAnimationFrame(qrBridgeRaf); qrBridgeRaf = null; }
     if (qrBridgeStream) {
       qrBridgeStream.getTracks().forEach((t) => t.stop());
@@ -1817,13 +1884,60 @@
     // 相手が読み取るまでこのQRを出しっぱなしにするので、その間も寝かせない
     requestWakeLock('qrbridge');
     qrBridgeStatus.textContent = '送信端末にこのQRを読み取ってもらってください';
+
+    // 短ければ従来どおり1枚（旧バージョンの送信端末でも読める形式）
+    if (txt.length <= QR_BRIDGE_PART_LEN) {
+      try {
+        drawQrToCanvas(qrBridgeCanvas, `${MISSING_QR_TAG}|${txt}`, {
+          typeNumber: 0, ecc: 'M', cellSize: 8, margin: 4,
+        });
+      } catch (err) {
+        qrBridgeStatus.textContent = `QR生成エラー: ${err.message}`;
+      }
+      return;
+    }
+
+    const missing = [];
+    for (let i = 0; i < recvState.total; i++) {
+      if (recvState.chunks[i] == null) missing.push(i);
+    }
+    const msg = encodeMissingMessage(missing, recvState.total);
+    const n = Math.ceil(msg.length / QR_BRIDGE_PART_LEN);
+    const id = newSessionId().slice(0, 4);
+    const parts = [];
+    for (let i = 0; i < n; i++) {
+      const body = msg.slice(i * QR_BRIDGE_PART_LEN, (i + 1) * QR_BRIDGE_PART_LEN);
+      parts.push(`${MISSING_QR_MULTI_TAG}|${id}|${i}|${n}|${body}`);
+    }
+    // 全パートを同じ大きさで描くため、最長のものに合わせて型番を固定する
+    let typeNumber;
     try {
-      drawQrToCanvas(qrBridgeCanvas, `${MISSING_QR_TAG}|${txt}`, {
-        typeNumber: 0, ecc: 'M', cellSize: 8, margin: 4,
-      });
+      typeNumber = resolveTypeNumber(parts, 'M');
     } catch (err) {
       qrBridgeStatus.textContent = `QR生成エラー: ${err.message}`;
+      return;
     }
+    const opts = { typeNumber, ecc: 'M', cellSize: 8, margin: 4 };
+    let cur = 0;
+    const showPart = () => {
+      try {
+        drawQrToCanvas(qrBridgeCanvas, parts[cur], opts);
+      } catch (err) {
+        qrBridgeStatus.textContent = `QR生成エラー: ${err.message}`;
+        clearInterval(qrBridgeShowTimer);
+        qrBridgeShowTimer = null;
+        return;
+      }
+      qrBridgePart.textContent = n > 1 ? `${cur + 1} / ${n}` : '';
+      cur = (cur + 1) % n;
+    };
+    qrBridgePart.hidden = n <= 1;
+    if (n > 1) {
+      qrBridgeStatus.textContent =
+        `送信端末にこのQRを読み取ってもらってください（${n}枚を自動で切り替え表示）`;
+    }
+    showPart();
+    if (n > 1) qrBridgeShowTimer = setInterval(showPart, QR_BRIDGE_PART_MS);
   });
 
   btnScanRange.addEventListener('click', async () => {
@@ -1865,6 +1979,13 @@
     qrBridgeStatus.textContent = '相手が表示しているQRを読み取ってください';
 
     const ctx = qrBridgeScanCanvas.getContext('2d', { willReadFrequently: true });
+    // 複数枚に分かれた未受信リストの収集状態（表示し直されたら id が変わる）
+    let multi = null;
+    const finish = (range) => {
+      closeQrBridge();
+      sendRange.value = range;
+      sendStatus.textContent = `受信成功: 範囲 ${range.length > 80 ? range.slice(0, 80) + '…' : range}（「反映」で適用）`;
+    };
     const scanOnce = () => {
       if (!qrBridgeStream) return; // closed while awaiting a frame
       if (qrBridgeVideo.readyState >= qrBridgeVideo.HAVE_CURRENT_DATA && qrBridgeVideo.videoWidth > 0) {
@@ -1876,11 +1997,37 @@
         const img = ctx.getImageData(0, 0, w, h);
         const code = jsQR(img.data, w, h, { inversionAttempts: 'attemptBoth' });
         if (code && code.data && code.data.startsWith(MISSING_QR_TAG + '|')) {
-          const range = code.data.slice(MISSING_QR_TAG.length + 1);
-          closeQrBridge();
-          sendRange.value = range;
-          sendStatus.textContent = `受信成功: 範囲 ${range}（「反映」で適用）`;
+          finish(code.data.slice(MISSING_QR_TAG.length + 1));
           return;
+        }
+        const m = code && code.data
+          && code.data.match(/^QRTN\|([^|]+)\|(\d+)\|(\d+)\|(.*)$/s);
+        if (m) {
+          const [, id, iStr, nStr, body] = m;
+          const i = +iStr, n = +nStr;
+          if (n > 0 && i < n) {
+            if (!multi || multi.id !== id || multi.n !== n) {
+              multi = { id, n, parts: new Array(n), got: 0 };
+            }
+            if (multi.parts[i] == null) {
+              multi.parts[i] = body;
+              multi.got++;
+              qrBridgeStatus.textContent = `読み取り中… ${multi.got} / ${n} 枚`;
+            }
+            if (multi.got === n) {
+              let range;
+              try {
+                range = decodeMissingMessage(multi.parts.join(''));
+              } catch (err) {
+                qrBridgeStatus.textContent = `復号エラー: ${err.message}（もう一度読み取ってください）`;
+                multi = null;
+                qrBridgeRaf = requestAnimationFrame(scanOnce);
+                return;
+              }
+              finish(range);
+              return;
+            }
+          }
         }
       }
       qrBridgeRaf = requestAnimationFrame(scanOnce);
