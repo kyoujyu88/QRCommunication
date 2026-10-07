@@ -9,7 +9,7 @@
 importScripts('vendor/jsQR.js');
 
 const MAX_CODES = 4;   // 同時表示の最大枚数（2×2）
-let engine = null;     // 'zxing' | 'jsqr'
+let engine = null;     // 'zxing' | 'zxing-js' | 'jsqr'
 let engineError = '';  // ZXing を使えなかった理由
 let ready = null;
 
@@ -37,8 +37,14 @@ function init(decoder) {
       });
       engine = 'zxing';
     } catch (err) {
-      engine = 'jsqr';
       engineError = (err && err.message) || String(err);
+      // WebAssembly が禁止されていても、純粋な JS の ZXing（複数読み取り対応）なら動く
+      try {
+        importScripts('vendor/zxing-multi.js');
+        engine = 'zxing-js';
+      } catch (_) {
+        engine = 'jsqr';
+      }
     }
   })();
   return ready;
@@ -80,6 +86,10 @@ self.onmessage = async (ev) => {
         return !boxes.some((b) => c.x >= b.x0 && c.x <= b.x1 && c.y >= b.y0 && c.y <= b.y1);
       });
       detected = valid.length + failed.length;
+    } else if (engine === 'zxing-js') {
+      const r = ZXingMulti.decode(new Uint8ClampedArray(buf), w, h);
+      for (const t of r.texts) datas.push(t);
+      detected = r.detected;
     } else {
       const code = jsQR(new Uint8ClampedArray(buf), w, h, { inversionAttempts: inversion });
       if (code && code.data) datas.push(code.data);

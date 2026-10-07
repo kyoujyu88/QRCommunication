@@ -67,7 +67,11 @@ GitHub リポジトリを機器間で転送するブラウザアプリです。�
 - **高速な読み取り**: 端末内蔵のQRデコーダ（BarcodeDetector）があれば
   それを使い、無い端末では ZXing（WebAssembly）を複数の Web Worker で並列に
   動かします。ZXing は jsQR より数倍速く、1枚の画像に写った複数の QR を
-  まとめて読めます（WebAssembly が使えない環境では jsQR に戻ります）。
+  まとめて読めます。WebAssembly がブラウザや組織のポリシーで禁止されている
+  環境（Edge の「セキュリティ強化」、JavaScript の JIT の無効化など。エラーは
+  「Wasm code generation disallowed by embedder」）では、純粋な JavaScript の
+  ZXing（JS版）に切り替えます。JS版も同時表示を読めますが、WebAssembly 版より
+  細かいQRに弱いので、「QR1枚の容量」を 300 程度にしてください。
   受信中はカメラ映像の右上に、実際に使っている読み取りエンジンを表示します
   （同時表示を読める「内蔵」「ZXing」は緑、読めない「jsQR」は橙）。jsQR に
   戻ったときは、その理由（WebAssembly が無効、.wasm ファイルを読み込めない
@@ -144,6 +148,9 @@ JS に埋め込んだもの（`vendor/zxing_reader.wasm.js`）を使い、CDN �
 - [qrcode-generator](vendor/qrcode-generator.js) (MIT)
 - [jsQR](vendor/jsQR.js) (Apache-2.0)
 - [fflate](vendor/fflate.min.js) (MIT)
+- [@zxing/library](vendor/zxing-multi.LICENSE) 0.23.0 (Apache-2.0)。`vendor/zxing-multi.js`。
+  ZXing（Java）の複数QR読み取りを移植したもの（WebAssembly 不要）。作り方は
+  `tools/zxing-multi/README.md`
 - [zxing-wasm](vendor/zxing-wasm.LICENSE) 3.1.5 (MIT。中身の zxing-cpp は Apache-2.0)。
   `vendor/zxing-reader.js` と `vendor/zxing_reader.wasm.js`。後者は zxing_reader.wasm を
   deflate → base64 にして埋め込んだもので（file:// では .wasm を取得できないため）、
