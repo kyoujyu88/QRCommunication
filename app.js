@@ -2223,6 +2223,10 @@
   function explainZxingError(err) {
     const msg = String(err || '')
       .replace(/^Aborted\(/, '').replace(/\)\.?\s*Build with -sASSERTIONS.*$/s, '').trim();
+    if (/disallowed by embedder/i.test(msg)) {
+      return '原因: ブラウザが WebAssembly の実行を禁止しています。Microsoft Edge の「セキュリティ強化」や、'
+        + '組織のポリシー（JavaScript の JIT の無効化など）によるもので、アプリ側からは変えられません。';
+    }
     if (/WebAssembly が無効/.test(msg)) {
       return '原因: このブラウザでは WebAssembly が無効です。Microsoft Edge の「セキュリティ強化」を「厳格」にしている場合や、'
         + '組織のポリシーで無効にされている場合に起こります。別のブラウザ（Chrome など）を使うか、このサイトをセキュリティ強化の例外に追加してください。';
@@ -2267,6 +2271,17 @@
     // 失敗したら次回また試せるようにする
     zxingMainReady.catch(() => { zxingMainReady = null; });
     return zxingMainReady;
+  }
+
+  // WebAssembly が禁止された環境向けの、純粋な JS の ZXing（複数読み取り対応）
+  let zxingJsReady = null;
+  function loadZxingJs() {
+    if (window.ZXingMulti) return Promise.resolve(window.ZXingMulti);
+    if (!zxingJsReady) {
+      zxingJsReady = loadScript('vendor/zxing-multi.js').then(() => window.ZXingMulti);
+      zxingJsReady.catch(() => { zxingJsReady = null; });
+    }
+    return zxingJsReady;
   }
 
   const zxingReadOptions = (inversion) => ({
@@ -2352,9 +2367,14 @@
           `使えません。${explainZxingError(mainErr || z.engineError || (wasm ? '' : 'WebAssembly が無効')) || '原因不明'}`);
       }
     }
+    let zxjsOk = false;
+    try { await loadZxingJs(); zxjsOk = true; } catch (_) { /* ファイル欠落など */ }
+    add(zxjsOk, 'ZXing（JS版・WebAssembly 不要）', zxjsOk
+      ? '使えます（同時表示OK。WebAssembly 版より細かいQRに弱いので「QR1枚の容量」300 程度を推奨）'
+      : '使えません（vendor/zxing-multi.js を読み込めません）');
     add(true, 'jsQR', '使えます（1枚ずつ。同時表示は読めません）');
 
-    const best = native ? '内蔵デコーダ' : zxingOk ? 'ZXing' : 'jsQR';
+    const best = native ? '内蔵デコーダ' : zxingOk ? 'ZXing' : zxjsOk ? 'ZXing（JS版）' : 'jsQR';
     decoderCheck.textContent = '';
     for (const r of rows) {
       const li = document.createElement('li');
@@ -2409,8 +2429,15 @@
       try {
         zxing = await loadZxingMain();
         if (!stopped) mode = 'zxing-main';
+        return;
       } catch (err) {
         engineError = err.message;
+      }
+      // WebAssembly が禁止されているなら、純粋な JS の ZXing（複数読み取り対応）
+      try {
+        await loadZxingJs();
+        if (!stopped) mode = 'zxjs-main';
+      } catch (_) {
         if (!stopped) mode = 'main';
       }
     }
@@ -2426,7 +2453,7 @@
             slot.busy = false;
             slot.engine = ev.data.engine;
             if (ev.data.engineError) engineError = ev.data.engineError;
-            noteFrame(ev.data.datas.length, ev.data.engine === 'zxing' ? ev.data.detected : null);
+            noteFrame(ev.data.datas.length, ev.data.engine === 'jsqr' ? null : ev.data.detected);
             if (!stopped) for (const text of ev.data.datas) onData(text);
           };
           w.onerror = () => {
@@ -2503,12 +2530,21 @@
         return;
       }
 
+      if (mode === 'zxjs-main') {
+        lastVideoTime = video.currentTime;
+        const img = grabFrame(true);
+        const r = window.ZXingMulti.decode(img.data, img.width, img.height);
+        noteFrame(r.texts.length, r.detected);
+        for (const text of r.texts) onData(text);
+        return;
+      }
+
       if (mode === 'worker') {
         const slot = workers.find((x) => !x.busy && !x.dead);
         if (!slot) return;
         lastVideoTime = video.currentTime;
         // ZXing は速く、同時表示のQRが中央からはみ出しても読めるよう全体を渡す
-        const img = grabFrame(slot.engine === 'zxing');
+        const img = grabFrame(slot.engine === 'zxing' || slot.engine === 'zxing-js');
         slot.busy = true;
         slot.w.postMessage(
           { buf: img.data.buffer, w: img.width, h: img.height, inversion, decoder },
@@ -2529,6 +2565,7 @@
     const currentEngine = () => {
       if (mode === 'native') return 'native';
       if (mode === 'zxing-main') return 'zxing-main';
+      if (mode === 'zxjs-main') return 'zxing-js';
       if (mode === 'main') return 'jsqr-main';
       if (mode === 'loading') return null;
       const known = workers.find((x) => x.engine);
@@ -2546,6 +2583,10 @@
         text = `ZXing ×${nWorkers} ✓ 同時表示OK`; cls = 'is-ok';
       } else if (eng === 'zxing-main') {
         text = 'ZXing ✓ 同時表示OK'; cls = 'is-ok';
+      } else if (eng === 'zxing-js') {
+        text = `ZXing（JS版）${mode === 'worker' ? ` ×${nWorkers}` : ''} ✓ 同時表示OK`; cls = 'is-ok';
+        note = `WebAssembly が使えないため、JS版の ZXing で読み取っています。${explainZxingError(engineError)}`
+          + ' JS版は WebAssembly 版より細かいQRに弱いので、同時表示のときは送信側の「QR1枚の容量」を 300 程度にしてください。';
       } else if (eng === 'jsqr' || eng === 'jsqr-main') {
         text = `jsQR${eng === 'jsqr' ? ` ×${nWorkers}` : ''} ⚠ 1枚ずつ（同時表示は読めません）`; cls = 'is-warn';
         if (decoder === 'jsqr') {
