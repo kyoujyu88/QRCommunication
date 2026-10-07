@@ -80,7 +80,7 @@ GitHub リポジトリを機器間で転送するブラウザアプリです。�
   この値より十分低く（目安: 半分程度）設定すると取りこぼしが減ります。
 - **設定を保存**: チャンクサイズ・FPS・誤り訂正レベル・QR バージョン・
   セルサイズ・カメラ解像度などを細かく調整でき、`localStorage` に保存
-  されます。外部への送信は GitHub リポジトリ取得時のみです。
+  されます。外部との通信は GitHub リポジトリ取得時のみです（後述）。
 
 ### 未受信チャンク番号の伝達（QRブリッジ）
 
@@ -120,8 +120,21 @@ GitHub リポジトリを機器間で転送するブラウザアプリです。�
 ## 動作要件
 
 カメラ（`getUserMedia`）を使うため、`https://` または `http://localhost`
-での配信が必要です。それ以外の URL ではカメラ起動に失敗する可能性が
-あります。
+で配信するか、`index.html` をファイルとして直接開いてください（Chrome・
+Edge で確認）。LAN 内の `http://192.168.x.x` などではカメラ起動に失敗します。
+
+ファイルとして直接開いた場合（`file://`）は、ブラウザの制限で Web Worker が
+使えないため、ZXing を並列ワーカーではなくページ上で動かします（ZXing は
+1回 10〜20ms 程度なので実用上は十分速く、同時表示も読めます）。
+
+## 外部との通信
+
+開いただけでは外部と一切通信しません。`index.html` の Content-Security-Policy
+で、ブラウザ自身に外部への接続を禁止させています。例外は GitHub リポジトリ
+送信で「ファイル一覧を取得」「QR表示開始」を押したときの `api.github.com` と
+`raw.githubusercontent.com` だけです。読み取りに使う ZXing の WebAssembly も
+JS に埋め込んだもの（`vendor/zxing_reader.wasm.js`）を使い、CDN などから
+取得することはありません。
 
 ## 使用ライブラリ
 
@@ -132,8 +145,9 @@ GitHub リポジトリを機器間で転送するブラウザアプリです。�
 - [jsQR](vendor/jsQR.js) (Apache-2.0)
 - [fflate](vendor/fflate.min.js) (MIT)
 - [zxing-wasm](vendor/zxing-wasm.LICENSE) 3.1.5 (MIT。中身の zxing-cpp は Apache-2.0)。
-  `vendor/zxing-reader.js` と `vendor/zxing_reader.wasm`。wasm は同じサーバーから
-  読み込み、外部の CDN には接続しません
+  `vendor/zxing-reader.js` と `vendor/zxing_reader.wasm.js`。後者は zxing_reader.wasm を
+  deflate → base64 にして埋め込んだもので（file:// では .wasm を取得できないため）、
+  `node tools/embed-zxing-wasm.js path/to/zxing_reader.wasm` で再生成できます
 
 ## 商標について
 

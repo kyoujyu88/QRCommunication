@@ -2227,11 +2227,77 @@
       return '原因: このブラウザでは WebAssembly が無効です。Microsoft Edge の「セキュリティ強化」を「厳格」にしている場合や、'
         + '組織のポリシーで無効にされている場合に起こります。別のブラウザ（Chrome など）を使うか、このサイトをセキュリティ強化の例外に追加してください。';
     }
-    if (/NetworkError|Failed to (load|fetch)|404|network/i.test(msg)) {
-      return `原因: 読み取り用ファイル（vendor/zxing_reader.wasm）を読み込めませんでした。社内のプロキシやフィルタで .wasm ファイルが遮断されている可能性があります。（${msg}）`;
+    if (/を読み込めませんでした|NetworkError|Failed to (load|fetch)/i.test(msg)) {
+      return `原因: 読み取り用ファイル（vendor/ 内）を読み込めませんでした。アプリのファイル一式がそろっているか確認してください。（${msg}）`;
     }
     return msg ? `原因: ${msg}` : '';
   }
+
+  // ---------- ZXing をページ上（メインスレッド）で動かす ----------
+  // index.html をファイルとして直接開く（file://）と、ブラウザは Web Worker の
+  // 起動も .wasm の取得も許さない。<script> での読み込みは許されるので、wasm を
+  // JS に埋め込んだ vendor/zxing_reader.wasm.js を読み、ページ上で ZXing を動かす。
+  // ZXing は1回 10〜20ms 程度なので、ワーカーが無くても jsQR より速い。
+  // どの経路でもネットワークには出ない（wasmBinary を直接渡す）。
+  let zxingMainReady = null;
+
+  function loadScript(src) {
+    return new Promise((resolve, reject) => {
+      const el = document.createElement('script');
+      el.src = src;
+      el.onload = resolve;
+      el.onerror = () => reject(new Error(`${src} を読み込めませんでした`));
+      document.head.appendChild(el);
+    });
+  }
+
+  function loadZxingMain() {
+    if (zxingMainReady) return zxingMainReady;
+    zxingMainReady = (async () => {
+      if (typeof WebAssembly !== 'object') throw new Error('このブラウザでは WebAssembly が無効です');
+      if (!window.ZXING_WASM_DEFLATE_BASE64) await loadScript('vendor/zxing_reader.wasm.js');
+      if (!window.ZXingWASM) await loadScript('vendor/zxing-reader.js');
+      const wasmBinary = fflate.inflateSync(base64ToBytes(window.ZXING_WASM_DEFLATE_BASE64));
+      await window.ZXingWASM.prepareZXingModule({
+        overrides: { wasmBinary, locateFile: (path) => 'vendor/' + path },
+        fireImmediately: true,
+      });
+      return window.ZXingWASM;
+    })();
+    // 失敗したら次回また試せるようにする
+    zxingMainReady.catch(() => { zxingMainReady = null; });
+    return zxingMainReady;
+  }
+
+  const zxingReadOptions = (inversion) => ({
+    formats: ['QRCode'],
+    maxNumberOfSymbols: 4,
+    tryHarder: true,
+    tryInvert: inversion !== 'dontInvert',
+    tryRotate: false,
+    returnErrors: true,
+  });
+
+  // ZXing の結果から、読めた文字列と「写っていたQRの数」を取り出す。読めたQRと
+  // 同じ位置の失敗結果（同じQRを別の読み方で失敗したもの）は数えない。
+  // scan-worker.js にも同じ処理がある。
+  function summarizeZxing(results) {
+    const corners = (p) => [p.topLeft, p.topRight, p.bottomRight, p.bottomLeft];
+    const valid = results.filter((r) => r.isValid && r.text);
+    const boxes = valid.map((r) => {
+      const xs = corners(r.position).map((c) => c.x), ys = corners(r.position).map((c) => c.y);
+      return { x0: Math.min(...xs), x1: Math.max(...xs), y0: Math.min(...ys), y1: Math.max(...ys) };
+    });
+    const failed = results.filter((r) => !r.isValid && r.position).filter((r) => {
+      const cs = corners(r.position);
+      const x = cs.reduce((n, c) => n + c.x, 0) / 4, y = cs.reduce((n, c) => n + c.y, 0) / 4;
+      return !boxes.some((b) => x >= b.x0 && x <= b.x1 && y >= b.y0 && y <= b.y1);
+    });
+    return { datas: valid.map((r) => r.text), detected: valid.length + failed.length };
+  }
+
+  // file:// で開いているとワーカーは必ず起動に失敗するので、最初から試さない
+  const workersAllowed = () => location.protocol !== 'file:' && typeof Worker === 'function';
 
   // ---------- この端末で使える読み取りエンジンの確認（設定タブ） ----------
   let decoderChecked = false;
@@ -2268,16 +2334,27 @@
       native ? '使えます（同時表示OK・最優先で使います）' : 'この端末・ブラウザにはありません（Android の Chrome などで使えます）');
 
     const wasm = typeof WebAssembly === 'object';
-    const z = await probeZxing();
+    let zxingOk = false;
+    const z = workersAllowed() ? await probeZxing() : { engine: null };
     if (z.engine === 'zxing') {
-      add(true, 'ZXing（WebAssembly）', '使えます（同時表示OK）');
+      zxingOk = true;
+      add(true, 'ZXing（WebAssembly）', '使えます（同時表示OK・並列ワーカーで動かします）');
     } else {
-      add(false, 'ZXing（WebAssembly）',
-        `使えません。${explainZxingError(z.engineError || (wasm ? '' : 'WebAssembly が無効')) || '原因不明'}`);
+      // ワーカーが使えない（file:// で開いている等）ときはページ上で動かせるか試す
+      let mainErr = '';
+      try { await loadZxingMain(); zxingOk = true; } catch (err) { mainErr = err.message; }
+      if (zxingOk) {
+        add(true, 'ZXing（WebAssembly）', location.protocol === 'file:'
+          ? '使えます（同時表示OK）。ファイルとして直接開いているため、並列ワーカーではなくページ上で動かします'
+          : '使えます（同時表示OK）。並列ワーカーが使えないため、ページ上で動かします');
+      } else {
+        add(false, 'ZXing（WebAssembly）',
+          `使えません。${explainZxingError(mainErr || z.engineError || (wasm ? '' : 'WebAssembly が無効')) || '原因不明'}`);
+      }
     }
     add(true, 'jsQR', '使えます（1枚ずつ。同時表示は読めません）');
 
-    const best = native ? '内蔵デコーダ' : z.engine === 'zxing' ? 'ZXing' : 'jsQR';
+    const best = native ? '内蔵デコーダ' : zxingOk ? 'ZXing' : 'jsQR';
     decoderCheck.textContent = '';
     for (const r of rows) {
       const li = document.createElement('li');
@@ -2302,8 +2379,10 @@
     let mode = 'main';
     let detector = null;
     let workers = [];
-    let engineError = '';      // ZXing を使えなかった理由（ワーカーから）
-    let workerFailure = false; // Worker 自体が動かずメインスレッドの jsQR になった
+    let engineError = '';      // ZXing を使えなかった理由
+    let workerFailure = false; // Worker が使えなかった（file:// で開いている等）
+    let zxing = null;          // ページ上で動かす ZXing（mode === 'zxing-main'）
+    let mainBusy = false;
     // 1秒ごとの集計。1回の解析で読めた最大枚数と、写っていた最大枚数（ZXing のみ）
     let decodedMax = 0;
     let detectedMax = null;
@@ -2320,7 +2399,24 @@
       workers = [];
     }
 
+    // ワーカーが使えないときの受け皿。ZXing をページ上で動かし、それも
+    // 駄目なら jsQR をページ上で動かす。準備ができるまで mode は 'loading'。
+    async function fallBackToMain() {
+      terminateWorkers();
+      workerFailure = true;
+      if (decoder === 'jsqr') { mode = 'main'; return; }
+      mode = 'loading';
+      try {
+        zxing = await loadZxingMain();
+        if (!stopped) mode = 'zxing-main';
+      } catch (err) {
+        engineError = err.message;
+        if (!stopped) mode = 'main';
+      }
+    }
+
     function startWorkers() {
+      if (!workersAllowed()) { fallBackToMain(); return; }
       const n = Math.max(1, Math.min(3, (navigator.hardwareConcurrency || 2) - 1));
       try {
         for (let i = 0; i < n; i++) {
@@ -2337,15 +2433,13 @@
             // 読み込み失敗など。全滅したらメインスレッドに切り替える
             slot.dead = true;
             slot.busy = false;
-            if (workers.every((x) => x.dead)) { terminateWorkers(); mode = 'main'; workerFailure = true; }
+            if (workers.every((x) => x.dead)) fallBackToMain();
           };
           workers.push(slot);
         }
         mode = 'worker';
       } catch {
-        terminateWorkers();
-        mode = 'main';
-        workerFailure = true;
+        fallBackToMain();
       }
     }
 
@@ -2394,6 +2488,21 @@
         return;
       }
 
+      if (mode === 'loading') return;
+
+      if (mode === 'zxing-main') {
+        if (mainBusy) return;
+        mainBusy = true;
+        lastVideoTime = video.currentTime;
+        zxing.readBarcodes(grabFrame(true), zxingReadOptions(inversion)).then((results) => {
+          mainBusy = false;
+          const r = summarizeZxing(results);
+          noteFrame(r.datas.length, r.detected);
+          if (!stopped) for (const text of r.datas) onData(text);
+        }).catch(() => { mainBusy = false; });
+        return;
+      }
+
       if (mode === 'worker') {
         const slot = workers.find((x) => !x.busy && !x.dead);
         if (!slot) return;
@@ -2419,7 +2528,9 @@
     // 実際に使っているエンジン。ワーカーは最初の応答まで ZXing か jsQR か分からない
     const currentEngine = () => {
       if (mode === 'native') return 'native';
+      if (mode === 'zxing-main') return 'zxing-main';
       if (mode === 'main') return 'jsqr-main';
+      if (mode === 'loading') return null;
       const known = workers.find((x) => x.engine);
       return known ? known.engine : null;
     };
@@ -2433,11 +2544,13 @@
         text = '内蔵デコーダ ✓ 同時表示OK'; cls = 'is-ok';
       } else if (eng === 'zxing') {
         text = `ZXing ×${nWorkers} ✓ 同時表示OK`; cls = 'is-ok';
+      } else if (eng === 'zxing-main') {
+        text = 'ZXing ✓ 同時表示OK'; cls = 'is-ok';
       } else if (eng === 'jsqr' || eng === 'jsqr-main') {
         text = `jsQR${eng === 'jsqr' ? ` ×${nWorkers}` : ''} ⚠ 1枚ずつ（同時表示は読めません）`; cls = 'is-warn';
         if (decoder === 'jsqr') {
           note = '設定の「読み取りエンジン」で「jsQR のみ」が選ばれています。同時表示を読むには「自動」にしてください。';
-        } else if (eng === 'jsqr-main' && workerFailure) {
+        } else if (eng === 'jsqr-main' && workerFailure && !engineError) {
           note = 'Web Worker を使えないため、jsQR をメインスレッドで動かしています（遅く、同時表示は読めません）。';
         } else {
           note = `ZXing（WebAssembly）を使えなかったため jsQR で読み取っています。${explainZxingError(engineError)}`;

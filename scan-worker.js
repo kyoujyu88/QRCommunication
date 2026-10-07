@@ -13,6 +13,13 @@ let engine = null;     // 'zxing' | 'jsqr'
 let engineError = '';  // ZXing を使えなかった理由
 let ready = null;
 
+function embeddedWasm() {
+  const bin = atob(self.ZXING_WASM_DEFLATE_BASE64);
+  const packed = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) packed[i] = bin.charCodeAt(i);
+  return fflate.inflateSync(packed);
+}
+
 function init(decoder) {
   if (ready) return ready;
   ready = (async () => {
@@ -21,10 +28,11 @@ function init(decoder) {
       // ブラウザの設定（Edge のセキュリティ強化モードなど）や組織のポリシーで
       // WebAssembly が無効にされていることがある
       if (typeof WebAssembly !== 'object') throw new Error('このブラウザでは WebAssembly が無効です');
-      importScripts('vendor/zxing-reader.js');
-      // wasm は同じサーバーの vendor/ から読む（既定のままだと CDN に取りに行く）
+      importScripts('vendor/fflate.min.js', 'vendor/zxing_reader.wasm.js', 'vendor/zxing-reader.js');
+      // wasm は JS に埋め込んだもの（vendor/zxing_reader.wasm.js）を使い、ネットワーク
+      // には一切出ない。locateFile も念のため差し替える（既定だと CDN を指している）。
       await ZXingWASM.prepareZXingModule({
-        overrides: { locateFile: (path) => 'vendor/' + path },
+        overrides: { wasmBinary: embeddedWasm(), locateFile: (path) => 'vendor/' + path },
         fireImmediately: true,
       });
       engine = 'zxing';

@@ -3,6 +3,11 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <!-- 外部との通信をブラウザに禁止させる。許すのはアプリ自身のファイルと、
+       GitHub リポジトリ送信で「ファイル一覧を取得」「QR表示開始」を押したときの
+       api.github.com / raw.githubusercontent.com だけ（開いただけでは通信しない）。
+       'wasm-unsafe-eval' は ZXing（WebAssembly）の実行に必要。 -->
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; worker-src 'self'; connect-src 'self' https://api.github.com https://raw.githubusercontent.com; img-src 'self' data: blob:; media-src 'self' blob: mediastream:; style-src 'self'; font-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'">
   <title>QRCommunication</title>
   <link rel="stylesheet" href="styles.css">
 </head>
