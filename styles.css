@@ -178,6 +178,10 @@ input[type=range] {
   padding: 4px;
   border-radius: 0;
 }
+.send-stage.is-focus .qr-wrap.layout-2 {
+  width: min(calc(100vw - 16px), calc((100vh - 88px) / 2));
+  width: min(calc(100vw - 16px), calc((100dvh - 88px) / 2));
+}
 .send-stage.is-focus .transport-row { margin: 8px 0 0; }
 .send-stage.is-focus .frame-no { color: #111; }
 body.no-scroll { overflow: hidden; }
@@ -251,7 +255,13 @@ body.no-scroll { overflow: hidden; }
   image-rendering: crisp-edges;
   width: 100%;
   height: 100%;
-  aspect-ratio: 1 / 1;
+  object-fit: contain;
+}
+
+/* 同時表示（縦2枚）は縦長の枠にする。2×2 は正方形のまま */
+.qr-wrap.layout-2 {
+  aspect-ratio: 1 / 2;
+  max-width: 320px;
 }
 
 .video-wrap {
