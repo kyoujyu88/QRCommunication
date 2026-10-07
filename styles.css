@@ -182,6 +182,10 @@ input[type=range] {
   width: min(calc(100vw - 16px), calc((100vh - 88px) / 2));
   width: min(calc(100vw - 16px), calc((100dvh - 88px) / 2));
 }
+.send-stage.is-focus .qr-wrap.layout-2h {
+  width: min(calc(100vw - 16px), calc((100vh - 88px) * 2));
+  width: min(calc(100vw - 16px), calc((100dvh - 88px) * 2));
+}
 .send-stage.is-focus .transport-row { margin: 8px 0 0; }
 .send-stage.is-focus .frame-no { color: #111; }
 body.no-scroll { overflow: hidden; }
@@ -258,10 +262,14 @@ body.no-scroll { overflow: hidden; }
   object-fit: contain;
 }
 
-/* 同時表示（縦2枚）は縦長の枠にする。2×2 は正方形のまま */
+/* 同時表示（2枚）は並べ方に合わせて縦長／横長の枠にする。2×2 は正方形のまま */
 .qr-wrap.layout-2 {
   aspect-ratio: 1 / 2;
   max-width: 320px;
+}
+.qr-wrap.layout-2h {
+  aspect-ratio: 2 / 1;
+  max-width: 720px;
 }
 
 .video-wrap {
