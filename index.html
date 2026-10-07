@@ -116,6 +116,7 @@
         <input id="sendRange" type="text" class="range-input"
                placeholder="例: 5,12,18-25 （空欄で全て）"
                autocomplete="off" spellcheck="false">
+        <button id="btnRangeClear" class="btn btn-sm" disabled title="範囲指定をすべて消す" aria-label="範囲指定をすべて消す">✕</button>
         <button id="btnScanRange" class="btn btn-sm" title="受信端末が表示するQRを読み取って自動入力">📷 QRで受け取る</button>
         <button id="btnRangeApply" class="btn btn-sm">反映</button>
       </div>
@@ -196,10 +197,11 @@
         <span class="field-label">同時表示</span>
         <select id="cfgMulti">
           <option value="1" selected>1枚（標準）</option>
-          <option value="2">縦に2枚（スマホの縦画面向け）</option>
+          <option value="2">2枚（画面の向きに合わせて縦か横に並べる）</option>
           <option value="4">2×2の4枚（PC・タブレットなど大画面向け）</option>
         </select>
-        <small class="hint">一度に複数のQRを並べて、1回の切り替えで運ぶ量を増やします。受信側が最新版で、読み取りエンジンが「内蔵」か「ZXing」のとき（受信画面の右下に表示）に使えます。QRが小さくなるので「QR1枚の容量」を 400〜500 程度に下げると読み取りやすくなります。旧形式の送信とは組み合わせられません。</small>
+        <small class="hint">一度に複数のQRを並べて、1回の切り替えで運ぶ量を増やします。受信側が最新版で、読み取りエンジンが「内蔵」か「ZXing」のとき（受信画面の右下に表示）に使えます。<br>
+          スマホの画面をPCのカメラで読むときは、スマホを<strong>横向き</strong>にして全画面表示にすると2枚が横に並び、Webカメラの横長の画角に合うので大きく写ります。受信側の取り込み解像度は 1280×720、「QR1枚の容量」は 500 以下がおすすめです。旧形式の送信とは組み合わせられません。</small>
       </label>
 
       <label class="field">
@@ -246,10 +248,10 @@
         <span class="field-label">取り込み解像度</span>
         <select id="cfgResolution">
           <option value="320">320 × 240（軽量）</option>
-          <option value="640" selected>640 × 480（標準）</option>
-          <option value="1280">1280 × 720（高精細）</option>
+          <option value="640">640 × 480（標準）</option>
+          <option value="1280" selected>1280 × 720（高精細・推奨）</option>
         </select>
-        <small class="hint">高解像度ほどCPU負荷が上がりますが小さなQRも読めます。</small>
+        <small class="hint">高解像度ほどCPU負荷が上がりますが小さなQRも読めます。スマホの画面をPCのWebカメラで読むときは、640×480 だとQRが小さすぎてほぼ読めません。実際の解像度は受信画面の右下に表示されます。</small>
       </label>
 
       <label class="field">

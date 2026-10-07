@@ -23,7 +23,7 @@
     cellSize: 8,
     margin: 4,
     facing: 'environment',
-    resolution: 640,
+    resolution: 1280,
     inversion: 'dontInvert',
     decoder: 'auto',
     imgCompress: '50',
@@ -70,6 +70,7 @@
   const qrCanvas = $('qrCanvas');
   const qrWrap = qrCanvas.parentElement;
   const sendRange = $('sendRange');
+  const btnRangeClear = $('btnRangeClear');
   const btnRangeApply = $('btnRangeApply');
   const btnRepoLoad = $('btnRepoLoad');
   const repoTreeStatus = $('repoTreeStatus');
@@ -658,11 +659,11 @@
     }
   }
 
-  // 同時表示：複数のQRを1枚のキャンバスに並べる（2 = 縦2枚、4 = 2×2）。
+  // 同時表示：複数のQRを1枚のキャンバスに並べる（cols × rows）。
   // 型番は全フレーム共通なので同じ大きさになる。読み取り側が別々のQRと
   // 見分けられるよう、QRどうしの間は 4 モジュール（QRの規格の余白）あける。
   // texts が枠より少ないとき（残り1枚など）は空いた枠を白のままにする。
-  function drawQrGrid(canvas, texts, opts, layout) {
+  function drawQrGrid(canvas, texts, opts, cols, rows) {
     const { typeNumber, ecc, cellSize, margin } = opts;
     const qrs = texts.map((t) => {
       const q = qrcode(typeNumber, ecc);
@@ -671,8 +672,6 @@
       return q;
     });
     const count = qrs[0].getModuleCount();
-    const cols = layout === 4 ? 2 : 1;
-    const rows = 2;
     const tile = count * cellSize;
     const gap = 4 * cellSize;
     canvas.width = margin * 2 + cols * tile + (cols - 1) * gap;
@@ -1542,6 +1541,40 @@
   // Draws the frame at the current sendIndex, then advances sendIndex to
   // the next one. Shared by the auto-loop timer and the manual step
   // buttons below, so a manual step and an auto-tick behave identically.
+  // 2枚表示は画面の向きで並べ方を変える。縦長なら縦に、横長なら横に並べると
+  // 1枚あたりを最も大きくできる。スマホを横向きにしてPCのWebカメラで読む
+  // ときは横並びが横長の画角に合い、縦並びより約4割大きく写る。
+  function isLandscapeView() {
+    return window.innerWidth > window.innerHeight;
+  }
+
+  function gridShape(multi) {
+    if (multi === 4) return [2, 2];
+    if (multi === 2) return isLandscapeView() ? [2, 1] : [1, 2];
+    return [1, 1];
+  }
+
+  function updateQrWrapLayout() {
+    const [cols, rows] = gridShape(sendMulti);
+    qrWrap.classList.toggle('layout-2', cols === 1 && rows === 2);
+    qrWrap.classList.toggle('layout-2h', cols === 2 && rows === 1);
+  }
+
+  // 送信中に端末を回転させたら、次の切り替えを待たずに並べ直す。スマホは
+  // アドレスバーの出入りでも resize が来るので、向きが変わったときだけにする。
+  let lastLandscape = isLandscapeView();
+  window.addEventListener('resize', () => {
+    const landscape = isLandscapeView();
+    if (landscape === lastLandscape) return;
+    lastLandscape = landscape;
+    if (!sendTimer || sendMulti !== 2) return;
+    updateQrWrapLayout();
+    clearSendTimer();
+    sendIndex = ((sendIndex - Math.min(sendMulti, sendActive.length)) % sendActive.length + sendActive.length) % sendActive.length;
+    sendTick();
+    sendTimer = setInterval(sendTick, sendTickMs);
+  });
+
   function sendTick() {
     const len = sendActive.length;
     const n = Math.min(sendMulti, len);
@@ -1549,7 +1582,10 @@
     for (let j = 0; j < n; j++) shown.push(sendActive[(sendIndex + j) % len]);
     try {
       if (sendMulti === 1) drawQrToCanvas(qrCanvas, sendAllFrames[shown[0]], sendRenderOpts);
-      else drawQrGrid(qrCanvas, shown.map((i) => sendAllFrames[i]), sendRenderOpts, sendMulti);
+      else {
+        const [cols, rows] = gridShape(sendMulti);
+        drawQrGrid(qrCanvas, shown.map((i) => sendAllFrames[i]), sendRenderOpts, cols, rows);
+      }
     } catch (err) {
       sendStatus.textContent = `QR生成エラー: ${err.message}（typeNumber を上げるかチャンクサイズを下げてください）`;
       stopSend();
@@ -1758,8 +1794,7 @@
     sendTickMs = Math.max(50, Math.round(1000 / s.fps));
     sendMeta = { kind: gathered.manifest.kind, sizeLabel };
     sendMulti = multiPerTick(s);
-    qrWrap.classList.toggle('layout-2', sendMulti === 2);
-    qrWrap.classList.toggle('layout-4', sendMulti === 4);
+    updateQrWrapLayout();
 
     const KIND_LABEL = { text: 'テキスト', file: 'ファイル', repo: 'リポジトリ' };
     sendSummary.textContent =
@@ -1808,6 +1843,15 @@
     sendActive = [];
     sendFrameNo.textContent = '— / —';
   }
+
+  // 範囲指定を一括で消す（QRで受け取った長い範囲を手で消すのは大変なので）
+  const syncRangeClear = () => { btnRangeClear.disabled = !sendRange.value; };
+  sendRange.addEventListener('input', syncRangeClear);
+  btnRangeClear.addEventListener('click', () => {
+    sendRange.value = '';
+    syncRangeClear();
+    sendRange.focus();
+  });
 
   btnRangeApply.addEventListener('click', () => {
     if (sendAllFrames.length) {
@@ -2284,7 +2328,8 @@
     recvScanRate.textContent = `解析 —回/秒（${label()}）`;
     recvScanRate.hidden = false;
     const rateTimer = setInterval(() => {
-      recvScanRate.textContent = `解析 ${analyzed}回/秒（${label()}）`;
+      const res = video.videoWidth ? `・${video.videoWidth}×${video.videoHeight}` : '';
+      recvScanRate.textContent = `解析 ${analyzed}回/秒（${label()}${res}）`;
       analyzed = 0;
     }, 1000);
 
@@ -2532,6 +2577,7 @@
     const finish = (range) => {
       closeQrBridge();
       sendRange.value = range;
+      syncRangeClear();
       sendStatus.textContent = `受信成功: 範囲 ${range.length > 80 ? range.slice(0, 80) + '…' : range}（「反映」で適用）`;
     };
     const scanOnce = () => {
