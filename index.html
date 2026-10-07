@@ -139,7 +139,9 @@
         <canvas id="scanCanvas" hidden></canvas>
         <div id="recvFrameNo" class="cam-frame-no" hidden></div>
         <div id="recvScanRate" class="cam-scan-rate" hidden></div>
+        <div id="recvEngine" class="cam-engine" hidden></div>
       </div>
+      <p id="recvEngineNote" class="engine-note" hidden></p>
       <div class="row recv-cam-actions">
         <button id="btnShowMissingQr" class="btn btn-sm" disabled title="未受信番号をQRコードで送信端末に見せる">📱 QRで送る</button>
       </div>
@@ -263,6 +265,15 @@
         </select>
         <small class="hint">内蔵デコーダ（BarcodeDetector）は Android の Chrome などで使えます。無い端末では ZXing（WebAssembly）を並列ワーカーで動かします。内蔵と ZXing は送信側の「同時表示」に対応しますが、jsQR は複数のQRが写っていると1枚も読めません。</small>
       </label>
+
+      <div class="field">
+        <span class="field-label">この端末で使える読み取りエンジン</span>
+        <ul id="decoderCheck" class="decoder-check"><li>未確認</li></ul>
+        <div class="row">
+          <button id="btnDecoderCheck" class="btn btn-sm">再確認</button>
+        </div>
+        <small class="hint">受信中はカメラ映像の右上にも、実際に使っているエンジンを表示します。</small>
+      </div>
 
       <label class="field">
         <span class="field-label">反転試行（jsQR inversionAttempts）</span>

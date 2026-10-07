@@ -90,6 +90,10 @@
   const cam = $('cam');
   const recvFrameNo = $('recvFrameNo');
   const recvScanRate = $('recvScanRate');
+  const recvEngine = $('recvEngine');
+  const recvEngineNote = $('recvEngineNote');
+  const decoderCheck = $('decoderCheck');
+  const btnDecoderCheck = $('btnDecoderCheck');
   const scanCanvas = $('scanCanvas');
   const recvProgress = $('recvProgress');
   const recvStatus = $('recvStatus');
@@ -261,7 +265,10 @@
 
   tabs.send.addEventListener('click', () => activateTab('send'));
   tabs.recv.addEventListener('click', () => activateTab('recv'));
-  tabs.settings.addEventListener('click', () => activateTab('settings'));
+  tabs.settings.addEventListener('click', () => {
+    activateTab('settings');
+    if (!decoderChecked) checkDecoders();
+  });
 
   // ----------------------------------------------------------------------
   // Send mode switching
@@ -2212,6 +2219,82 @@
     }
   }
 
+  // ZXing を使えなかった理由を、利用者が対処できる言葉にする
+  function explainZxingError(err) {
+    const msg = String(err || '')
+      .replace(/^Aborted\(/, '').replace(/\)\.?\s*Build with -sASSERTIONS.*$/s, '').trim();
+    if (/WebAssembly が無効/.test(msg)) {
+      return '原因: このブラウザでは WebAssembly が無効です。Microsoft Edge の「セキュリティ強化」を「厳格」にしている場合や、'
+        + '組織のポリシーで無効にされている場合に起こります。別のブラウザ（Chrome など）を使うか、このサイトをセキュリティ強化の例外に追加してください。';
+    }
+    if (/NetworkError|Failed to (load|fetch)|404|network/i.test(msg)) {
+      return `原因: 読み取り用ファイル（vendor/zxing_reader.wasm）を読み込めませんでした。社内のプロキシやフィルタで .wasm ファイルが遮断されている可能性があります。（${msg}）`;
+    }
+    return msg ? `原因: ${msg}` : '';
+  }
+
+  // ---------- この端末で使える読み取りエンジンの確認（設定タブ） ----------
+  let decoderChecked = false;
+
+  function probeZxing() {
+    return new Promise((resolve) => {
+      let w;
+      const done = (r) => { clearTimeout(timer); try { w.terminate(); } catch {} resolve(r); };
+      const timer = setTimeout(() => done({ engine: null, engineError: '応答がありません（時間切れ）' }), 15000);
+      try {
+        w = new Worker('scan-worker.js');
+      } catch (err) {
+        done({ engine: null, engineError: `Web Worker を起動できません（${err.message}）` });
+        return;
+      }
+      w.onmessage = (ev) => done(ev.data);
+      w.onerror = (ev) => done({ engine: null, engineError: `ワーカーの読み込みに失敗しました（${ev.message || 'エラー'}）` });
+      w.postMessage({ probe: true, decoder: 'zxing' });
+    });
+  }
+
+  async function checkDecoders() {
+    decoderChecked = true;
+    btnDecoderCheck.disabled = true;
+    decoderCheck.innerHTML = '<li>確認中…</li>';
+    const rows = [];
+    const add = (ok, name, detail) => rows.push({ ok, name, detail });
+
+    let native = false;
+    if ('BarcodeDetector' in window) {
+      try { native = (await window.BarcodeDetector.getSupportedFormats()).includes('qr_code'); } catch {}
+    }
+    add(native, '内蔵デコーダ（BarcodeDetector）',
+      native ? '使えます（同時表示OK・最優先で使います）' : 'この端末・ブラウザにはありません（Android の Chrome などで使えます）');
+
+    const wasm = typeof WebAssembly === 'object';
+    const z = await probeZxing();
+    if (z.engine === 'zxing') {
+      add(true, 'ZXing（WebAssembly）', '使えます（同時表示OK）');
+    } else {
+      add(false, 'ZXing（WebAssembly）',
+        `使えません。${explainZxingError(z.engineError || (wasm ? '' : 'WebAssembly が無効')) || '原因不明'}`);
+    }
+    add(true, 'jsQR', '使えます（1枚ずつ。同時表示は読めません）');
+
+    const best = native ? '内蔵デコーダ' : z.engine === 'zxing' ? 'ZXing' : 'jsQR';
+    decoderCheck.textContent = '';
+    for (const r of rows) {
+      const li = document.createElement('li');
+      const mark = document.createElement('span');
+      mark.className = r.ok ? 'ok' : 'ng';
+      mark.textContent = r.ok ? '○ ' : '× ';
+      li.append(mark, `${r.name}：${r.detail}`);
+      decoderCheck.appendChild(li);
+    }
+    const li = document.createElement('li');
+    li.textContent = `→ 「自動」のときに使われるのは ${best} です`;
+    decoderCheck.appendChild(li);
+    btnDecoderCheck.disabled = false;
+  }
+
+  btnDecoderCheck.addEventListener('click', checkDecoders);
+
   async function startScanEngine({ video, canvas, inversion, decoder, onData }) {
     let stopped = false;
     let raf = null;
@@ -2219,7 +2302,18 @@
     let mode = 'main';
     let detector = null;
     let workers = [];
+    let engineError = '';      // ZXing を使えなかった理由（ワーカーから）
+    let workerFailure = false; // Worker 自体が動かずメインスレッドの jsQR になった
+    // 1秒ごとの集計。1回の解析で読めた最大枚数と、写っていた最大枚数（ZXing のみ）
+    let decodedMax = 0;
+    let detectedMax = null;
     const ctx = canvas.getContext('2d', { willReadFrequently: true });
+
+    function noteFrame(decoded, detected) {
+      analyzed++;
+      if (decoded > decodedMax) decodedMax = decoded;
+      if (detected != null && (detectedMax == null || detected > detectedMax)) detectedMax = detected;
+    }
 
     function terminateWorkers() {
       for (const slot of workers) { try { slot.w.terminate(); } catch {} }
@@ -2235,14 +2329,15 @@
           w.onmessage = (ev) => {
             slot.busy = false;
             slot.engine = ev.data.engine;
-            analyzed++;
+            if (ev.data.engineError) engineError = ev.data.engineError;
+            noteFrame(ev.data.datas.length, ev.data.engine === 'zxing' ? ev.data.detected : null);
             if (!stopped) for (const text of ev.data.datas) onData(text);
           };
           w.onerror = () => {
             // 読み込み失敗など。全滅したらメインスレッドに切り替える
             slot.dead = true;
             slot.busy = false;
-            if (workers.every((x) => x.dead)) { terminateWorkers(); mode = 'main'; }
+            if (workers.every((x) => x.dead)) { terminateWorkers(); mode = 'main'; workerFailure = true; }
           };
           workers.push(slot);
         }
@@ -2250,6 +2345,7 @@
       } catch {
         terminateWorkers();
         mode = 'main';
+        workerFailure = true;
       }
     }
 
@@ -2287,7 +2383,7 @@
         lastVideoTime = video.currentTime;
         detector.detect(video).then((codes) => {
           nativeBusy = false;
-          analyzed++;
+          noteFrame(codes.length, null);
           if (stopped) return;
           for (const c of codes) if (c.rawValue) onData(c.rawValue);
         }).catch(() => {
@@ -2315,22 +2411,65 @@
       lastVideoTime = video.currentTime;
       const img = grabFrame(false);
       const code = jsQR(img.data, img.width, img.height, { inversionAttempts: inversion });
-      analyzed++;
+      noteFrame(code && code.data ? 1 : 0, null);
       if (code && code.data) onData(code.data);
     };
     raf = requestAnimationFrame(tick);
 
-    // 1秒ごとに解析回数を表示（送信側FPSをこれより十分低くすると取りこぼしにくい）
-    const label = () => (mode === 'native' ? '内蔵'
-      : mode === 'worker'
-        ? `${(workers.find((x) => x.engine) || {}).engine === 'zxing' ? 'ZXing' : 'jsQR'}×${workers.filter((x) => !x.dead).length}`
-        : 'jsQR');
-    recvScanRate.textContent = `解析 —回/秒（${label()}）`;
+    // 実際に使っているエンジン。ワーカーは最初の応答まで ZXing か jsQR か分からない
+    const currentEngine = () => {
+      if (mode === 'native') return 'native';
+      if (mode === 'main') return 'jsqr-main';
+      const known = workers.find((x) => x.engine);
+      return known ? known.engine : null;
+    };
+
+    // カメラ映像の右上のバッジと、jsQR に落ちたときの理由を更新する
+    const updateEngineBadge = () => {
+      const eng = currentEngine();
+      const nWorkers = workers.filter((x) => !x.dead).length;
+      let text, cls, note = '';
+      if (eng === 'native') {
+        text = '内蔵デコーダ ✓ 同時表示OK'; cls = 'is-ok';
+      } else if (eng === 'zxing') {
+        text = `ZXing ×${nWorkers} ✓ 同時表示OK`; cls = 'is-ok';
+      } else if (eng === 'jsqr' || eng === 'jsqr-main') {
+        text = `jsQR${eng === 'jsqr' ? ` ×${nWorkers}` : ''} ⚠ 1枚ずつ（同時表示は読めません）`; cls = 'is-warn';
+        if (decoder === 'jsqr') {
+          note = '設定の「読み取りエンジン」で「jsQR のみ」が選ばれています。同時表示を読むには「自動」にしてください。';
+        } else if (eng === 'jsqr-main' && workerFailure) {
+          note = 'Web Worker を使えないため、jsQR をメインスレッドで動かしています（遅く、同時表示は読めません）。';
+        } else {
+          note = `ZXing（WebAssembly）を使えなかったため jsQR で読み取っています。${explainZxingError(engineError)}`;
+        }
+      } else {
+        text = '読み取りエンジン準備中…'; cls = '';
+      }
+      recvEngine.textContent = text;
+      recvEngine.className = `cam-engine ${cls}`;
+      recvEngine.hidden = false;
+      recvEngineNote.textContent = note;
+      recvEngineNote.hidden = !note;
+    };
+
+    // 1秒ごとに解析回数を表示（送信側FPSをこれより十分低くすると取りこぼしにくい）。
+    // ZXing は「写っているが読めなかった」QRも数えられるので併記する。
+    // 検出はあるのに読取が 0 なら、ピント・距離・解像度の問題と分かる。
+    recvScanRate.textContent = '解析 —回/秒';
     recvScanRate.hidden = false;
+    updateEngineBadge();
     const rateTimer = setInterval(() => {
       const res = video.videoWidth ? `・${video.videoWidth}×${video.videoHeight}` : '';
-      recvScanRate.textContent = `解析 ${analyzed}回/秒（${label()}${res}）`;
+      let codes = `・読取 ${decodedMax}枚`;
+      if (detectedMax != null) {
+        codes = `・検出 ${detectedMax}枚 / 読取 ${decodedMax}枚`;
+        if (detectedMax > decodedMax) codes += '（ピンぼけ・小さすぎ？）';
+      }
+      recvScanRate.textContent = `解析 ${analyzed}回/秒${res}${codes}`;
       analyzed = 0;
+      decodedMax = 0;
+      detectedMax = null;
+      updateEngineBadge();
     }, 1000);
 
     return {
@@ -2342,6 +2481,8 @@
         terminateWorkers();
         recvScanRate.hidden = true;
         recvScanRate.textContent = '';
+        recvEngine.hidden = true;
+        recvEngineNote.hidden = true;
       },
     };
   }
