@@ -28,6 +28,7 @@
     decoder: 'auto',
     imgCompress: '50',
     protocol: 'v3',
+    multi: '1',
   };
 
   // ----------------------------------------------------------------------
@@ -67,6 +68,7 @@
   const sendTextInfo = $('sendTextInfo');
   const sendStatus = $('sendStatus');
   const qrCanvas = $('qrCanvas');
+  const qrWrap = qrCanvas.parentElement;
   const sendRange = $('sendRange');
   const btnRangeApply = $('btnRangeApply');
   const btnRepoLoad = $('btnRepoLoad');
@@ -128,6 +130,7 @@
     decoder: $('cfgDecoder'),
     imgCompress: $('cfgImgCompress'),
     protocol: $('cfgProtocol'),
+    multi: $('cfgMulti'),
   };
   const imgCompressField = $('imgCompressField');
   const out = {
@@ -152,6 +155,8 @@
     if (LEGACY_IMG_COMPRESS[v]) s.imgCompress = LEGACY_IMG_COMPRESS[v];
     else if (v !== 'none' && !IMG_SCALES[v]) s.imgCompress = DEFAULT_SETTINGS.imgCompress;
     if (s.protocol !== 'v3' && s.protocol !== 'v2') s.protocol = DEFAULT_SETTINGS.protocol;
+    if (!['1', '2', '4'].includes(s.multi)) s.multi = DEFAULT_SETTINGS.multi;
+    if (!['auto', 'zxing', 'jsqr'].includes(s.decoder)) s.decoder = DEFAULT_SETTINGS.decoder;
     return s;
   }
 
@@ -194,6 +199,7 @@
       decoder: cfg.decoder.value,
       imgCompress: cfg.imgCompress.value,
       protocol: cfg.protocol.value,
+      multi: cfg.multi.value,
     };
   }
 
@@ -210,6 +216,7 @@
     cfg.decoder.value = s.decoder;
     cfg.imgCompress.value = s.imgCompress;
     cfg.protocol.value = s.protocol;
+    cfg.multi.value = s.multi;
     updateOutputs();
   }
 
@@ -649,6 +656,40 @@
         }
       }
     }
+  }
+
+  // 同時表示：複数のQRを1枚のキャンバスに並べる（2 = 縦2枚、4 = 2×2）。
+  // 型番は全フレーム共通なので同じ大きさになる。読み取り側が別々のQRと
+  // 見分けられるよう、QRどうしの間は 4 モジュール（QRの規格の余白）あける。
+  // texts が枠より少ないとき（残り1枚など）は空いた枠を白のままにする。
+  function drawQrGrid(canvas, texts, opts, layout) {
+    const { typeNumber, ecc, cellSize, margin } = opts;
+    const qrs = texts.map((t) => {
+      const q = qrcode(typeNumber, ecc);
+      q.addData(t, opts.mode || 'Byte');
+      q.make();
+      return q;
+    });
+    const count = qrs[0].getModuleCount();
+    const cols = layout === 4 ? 2 : 1;
+    const rows = 2;
+    const tile = count * cellSize;
+    const gap = 4 * cellSize;
+    canvas.width = margin * 2 + cols * tile + (cols - 1) * gap;
+    canvas.height = margin * 2 + rows * tile + (rows - 1) * gap;
+    const ctx = canvas.getContext('2d');
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.fillStyle = '#000000';
+    qrs.forEach((qr, i) => {
+      const ox = margin + (i % cols) * (tile + gap);
+      const oy = margin + Math.floor(i / cols) * (tile + gap);
+      for (let r = 0; r < count; r++) {
+        for (let c = 0; c < count; c++) {
+          if (qr.isDark(r, c)) ctx.fillRect(ox + c * cellSize, oy + r * cellSize, cellSize, cellSize);
+        }
+      }
+    });
   }
 
   // Pick a single typeNumber covering the longest frame so every chunk
@@ -1374,8 +1415,13 @@
     return Math.max(1, Math.ceil(bytes / rawBytesPerFrame(chunkSize)));
   }
 
+  // 一度に表示する枚数。旧形式は旧受信側（jsQR・1枚ずつ）向けなので常に1枚
+  function multiPerTick(s = settingsFromInputs()) {
+    return s.protocol === 'v2' ? 1 : +s.multi;
+  }
+
   function estimateSeconds(bytes, chunkSize, fps) {
-    return Math.max(1, Math.ceil(estimateFrames(bytes, chunkSize) / fps));
+    return Math.max(1, Math.ceil(estimateFrames(bytes, chunkSize) / (fps * multiPerTick())));
   }
 
   function formatDuration(sec) {
@@ -1487,6 +1533,7 @@
   let sendMeta = null;      // { kind, sizeLabel }
   let sendBusy = false;
   let sendLoops = 0;        // 何周目か（受信側が何周待てばよいかの目安）
+  let sendMulti = 1;        // 1回の切り替えで並べる枚数（1 / 2 / 4）
 
   function clearSendTimer() {
     if (sendTimer) { clearInterval(sendTimer); sendTimer = null; }
@@ -1496,10 +1543,13 @@
   // the next one. Shared by the auto-loop timer and the manual step
   // buttons below, so a manual step and an auto-tick behave identically.
   function sendTick() {
-    const realIdx = sendActive[sendIndex];
-    const frame = sendAllFrames[realIdx];
+    const len = sendActive.length;
+    const n = Math.min(sendMulti, len);
+    const shown = [];
+    for (let j = 0; j < n; j++) shown.push(sendActive[(sendIndex + j) % len]);
     try {
-      drawQrToCanvas(qrCanvas, frame, sendRenderOpts);
+      if (sendMulti === 1) drawQrToCanvas(qrCanvas, sendAllFrames[shown[0]], sendRenderOpts);
+      else drawQrGrid(qrCanvas, shown.map((i) => sendAllFrames[i]), sendRenderOpts, sendMulti);
     } catch (err) {
       sendStatus.textContent = `QR生成エラー: ${err.message}（typeNumber を上げるかチャンクサイズを下げてください）`;
       stopSend();
@@ -1510,9 +1560,14 @@
       ? ''
       : ` ｜ 範囲 ${sendActive.length}枚`;
     sendStatus.textContent = `送信中 ${sendLoops}周目${subsetLabel}`;
-    sendFrameNo.textContent = `${realIdx + 1} / ${total}`;
-    sendIndex = (sendIndex + 1) % sendActive.length;
-    if (sendIndex === 0) sendLoops++;
+    const first = shown[0] + 1;
+    const last = shown[shown.length - 1] + 1;
+    sendFrameNo.textContent = n === 1 ? `${first} / ${total}`
+      : n === 2 ? `${first}・${last} / ${total}`
+      : `${first}〜${last} / ${total}`;
+    const next = sendIndex + n;
+    if (next >= len) sendLoops++;
+    sendIndex = next % len;
   }
 
   function startSendLoop() {
@@ -1542,7 +1597,8 @@
   function stepSendBackward() {
     if (!sendTimer || !sendActive.length) return;
     const len = sendActive.length;
-    sendIndex = ((sendIndex - 2) % len + len) % len;
+    const n = Math.min(sendMulti, len);
+    sendIndex = ((sendIndex - 2 * n) % len + len) % len;
     clearSendTimer();
     sendTick();
     sendTimer = setInterval(sendTick, sendTickMs);
@@ -1587,7 +1643,8 @@
     if (on === isOn) return;
     sendStage.classList.toggle('is-focus', on);
     document.body.classList.toggle('no-scroll', on);
-    btnSendFocus.textContent = on ? '✕ 戻る' : '⛶';
+    btnSendFocus.textContent = on ? '✕' : '⛶';
+    btnSendFocus.setAttribute('aria-label', on ? '全画面表示を終了' : '全画面表示');
     if (on) {
       if (sendStage.requestFullscreen && !document.fullscreenElement) {
         sendStage.requestFullscreen().catch(() => {});
@@ -1700,11 +1757,15 @@
     };
     sendTickMs = Math.max(50, Math.round(1000 / s.fps));
     sendMeta = { kind: gathered.manifest.kind, sizeLabel };
+    sendMulti = multiPerTick(s);
+    qrWrap.classList.toggle('layout-2', sendMulti === 2);
+    qrWrap.classList.toggle('layout-4', sendMulti === 4);
 
     const KIND_LABEL = { text: 'テキスト', file: 'ファイル', repo: 'リポジトリ' };
     sendSummary.textContent =
       `${KIND_LABEL[gathered.manifest.kind] || gathered.manifest.kind}：${gathered.manifest.name}`
-      + ` ｜ ${sizeLabel} ｜ ${frames.length}枚 ｜ 1周 約${formatDuration(Math.max(1, Math.ceil(frames.length / s.fps)))}`
+      + ` ｜ ${sizeLabel} ｜ ${frames.length}枚 ｜ 1周 約${formatDuration(Math.max(1, Math.ceil(frames.length / (s.fps * sendMulti))))}`
+      + (sendMulti > 1 ? ` ｜ 同時${sendMulti}枚` : '')
       + (legacy ? ' ｜ 旧形式（互換）' : '');
 
     // Honor any pre-filled range; fall back to all on parse error
@@ -2089,9 +2150,12 @@
   // 十分に上回らないと取りこぼす。jsQR は1枚あたり数十〜数百ms掛かり、
   // しかもメインスレッドを塞ぐため、以下の順で速いものを使う。
   //   1. BarcodeDetector（端末内蔵。Android Chrome 等で高速・別スレッド）
-  //   2. jsQR を Web Worker で複数並列（CPUコア数に応じて解析回数が伸びる）
+  //   2. Web Worker を複数並列（CPUコア数に応じて解析回数が伸びる）。
+  //      各ワーカーは ZXing（WebAssembly）で読み、使えなければ jsQR に戻る
   //   3. jsQR をメインスレッドで（Worker が使えない環境向けの最終手段）
-  // jsQR には映像中央の正方形だけを渡す（左右の余白を捨てて約3割速くなる）。
+  // 1 と ZXing は1枚の映像に写った複数のQRを読めるので、送信側の同時表示
+  // （縦2枚・2×2）に対応する。jsQR は1枚しか読めず、複数写っていると
+  // 1枚も読めない。jsQR には映像中央の正方形だけを渡す（約3割速くなる）。
 
   async function createBarcodeDetector() {
     if (!('BarcodeDetector' in window)) return null;
@@ -2123,11 +2187,12 @@
       try {
         for (let i = 0; i < n; i++) {
           const w = new Worker('scan-worker.js');
-          const slot = { w, busy: false, dead: false };
+          const slot = { w, busy: false, dead: false, engine: null };
           w.onmessage = (ev) => {
             slot.busy = false;
+            slot.engine = ev.data.engine;
             analyzed++;
-            if (!stopped && ev.data.data) onData(ev.data.data);
+            if (!stopped) for (const text of ev.data.datas) onData(text);
           };
           w.onerror = () => {
             // 読み込み失敗など。全滅したらメインスレッドに切り替える
@@ -2144,19 +2209,22 @@
       }
     }
 
-    if (decoder !== 'jsqr') detector = await createBarcodeDetector();
+    if (decoder === 'auto') detector = await createBarcodeDetector();
     if (detector) mode = 'native';
     else startWorkers();
 
-    // 映像中央の正方形を切り出して画素を取る
-    function grabCenter() {
+    // 映像の画素を取る。full でなければ中央の正方形だけを切り出す
+    function grabFrame(full) {
       const w = video.videoWidth;
       const h = video.videoHeight;
       const S = Math.min(w, h);
-      if (canvas.width !== S) canvas.width = S;
-      if (canvas.height !== S) canvas.height = S;
-      ctx.drawImage(video, (w - S) >> 1, (h - S) >> 1, S, S, 0, 0, S, S);
-      return ctx.getImageData(0, 0, S, S);
+      const cw = full ? w : S;
+      const ch = full ? h : S;
+      if (canvas.width !== cw) canvas.width = cw;
+      if (canvas.height !== ch) canvas.height = ch;
+      if (full) ctx.drawImage(video, 0, 0, w, h);
+      else ctx.drawImage(video, (w - S) >> 1, (h - S) >> 1, S, S, 0, 0, S, S);
+      return ctx.getImageData(0, 0, cw, ch);
     }
 
     let nativeBusy = false;
@@ -2190,17 +2258,18 @@
         const slot = workers.find((x) => !x.busy && !x.dead);
         if (!slot) return;
         lastVideoTime = video.currentTime;
-        const img = grabCenter();
+        // ZXing は速く、同時表示のQRが中央からはみ出しても読めるよう全体を渡す
+        const img = grabFrame(slot.engine === 'zxing');
         slot.busy = true;
         slot.w.postMessage(
-          { buf: img.data.buffer, w: img.width, h: img.height, inversion },
+          { buf: img.data.buffer, w: img.width, h: img.height, inversion, decoder },
           [img.data.buffer]
         );
         return;
       }
 
       lastVideoTime = video.currentTime;
-      const img = grabCenter();
+      const img = grabFrame(false);
       const code = jsQR(img.data, img.width, img.height, { inversionAttempts: inversion });
       analyzed++;
       if (code && code.data) onData(code.data);
@@ -2209,7 +2278,9 @@
 
     // 1秒ごとに解析回数を表示（送信側FPSをこれより十分低くすると取りこぼしにくい）
     const label = () => (mode === 'native' ? '内蔵'
-      : mode === 'worker' ? `jsQR×${workers.filter((x) => !x.dead).length}` : 'jsQR');
+      : mode === 'worker'
+        ? `${(workers.find((x) => x.engine) || {}).engine === 'zxing' ? 'ZXing' : 'jsQR'}×${workers.filter((x) => !x.dead).length}`
+        : 'jsQR');
     recvScanRate.textContent = `解析 —回/秒（${label()}）`;
     recvScanRate.hidden = false;
     const rateTimer = setInterval(() => {
