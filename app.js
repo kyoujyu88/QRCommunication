@@ -56,6 +56,9 @@
   const btnSendFilesClear = $('btnSendFilesClear');
   const sendRepoUrl = $('sendRepoUrl');
   const sendRepoParsed = $('sendRepoParsed');
+  const repoHistory = $('repoHistory');
+  const repoHistoryList = $('repoHistoryList');
+  const btnRepoHistoryClear = $('btnRepoHistoryClear');
   const btnSendStart = $('btnSendStart');
   const btnSendStop = $('btnSendStop');
   const btnSendPrev = $('btnSendPrev');
@@ -354,6 +357,85 @@
   }
 
   sendRepoUrl.addEventListener('input', updateRepoPreview);
+
+  // ---------- リポジトリURLの履歴 ----------
+  // 一覧の取得や送信に成功したURLを覚えておき、押すだけで入力し直せるようにする。
+  // 保存先はこの端末のブラウザ（localStorage）だけで、外部には送らない。
+  // 同じリポジトリ（owner/repo/ref が同じ）は書き方が違っても1件にまとめ、
+  // 最後に使った書き方を残す。
+  const REPO_HISTORY_KEY = 'qrtt.repoHistory.v1';
+  const REPO_HISTORY_MAX = 20;
+
+  function loadRepoHistory() {
+    try {
+      const list = JSON.parse(localStorage.getItem(REPO_HISTORY_KEY) || '[]');
+      return Array.isArray(list) ? list.filter((v) => typeof v === 'string' && v) : [];
+    } catch {
+      return [];
+    }
+  }
+
+  function saveRepoHistory(list) {
+    try { localStorage.setItem(REPO_HISTORY_KEY, JSON.stringify(list)); } catch { /* private mode etc. */ }
+  }
+
+  function repoHistoryKey(value) {
+    const spec = parseRepoSpec(value);
+    return spec ? `${spec.owner}/${spec.repo}@${spec.ref}`.toLowerCase() : value.trim();
+  }
+
+  function addRepoHistory(value) {
+    const v = (value || '').trim();
+    if (!v || !parseRepoSpec(v)) return;
+    const key = repoHistoryKey(v);
+    const list = [v, ...loadRepoHistory().filter((x) => repoHistoryKey(x) !== key)];
+    saveRepoHistory(list.slice(0, REPO_HISTORY_MAX));
+    renderRepoHistory();
+  }
+
+  function renderRepoHistory() {
+    const list = loadRepoHistory();
+    repoHistory.hidden = list.length === 0;
+    repoHistoryList.textContent = '';
+    const frag = document.createDocumentFragment();
+    for (const v of list) {
+      const li = document.createElement('li');
+      li.className = 'repo-history-row';
+      const pick = document.createElement('button');
+      pick.type = 'button';
+      pick.className = 'repo-history-pick';
+      pick.textContent = v;
+      const spec = parseRepoSpec(v);
+      if (spec) pick.title = `${spec.owner}/${spec.repo}${spec.ref ? ' @ ' + spec.ref : ''}`;
+      pick.disabled = sendRepoUrl.disabled;
+      pick.addEventListener('click', () => {
+        sendRepoUrl.value = v;
+        // 入力したのと同じ扱いにする（解釈の表示と、取得済み一覧の破棄）
+        sendRepoUrl.dispatchEvent(new Event('input'));
+        sendRepoUrl.focus();
+      });
+      const rm = document.createElement('button');
+      rm.type = 'button';
+      rm.className = 'send-file-remove';
+      rm.textContent = '✕';
+      rm.title = 'この履歴を削除';
+      rm.setAttribute('aria-label', `${v} を履歴から削除`);
+      rm.disabled = sendRepoUrl.disabled;
+      rm.addEventListener('click', () => {
+        saveRepoHistory(loadRepoHistory().filter((x) => x !== v));
+        renderRepoHistory();
+      });
+      li.append(pick, rm);
+      frag.appendChild(li);
+    }
+    repoHistoryList.appendChild(frag);
+  }
+
+  btnRepoHistoryClear.addEventListener('click', () => {
+    if (!confirm('リポジトリURLの履歴をすべて削除しますか？')) return;
+    saveRepoHistory([]);
+    renderRepoHistory();
+  });
 
   // ----------------------------------------------------------------------
   // Byte / base64 helpers
@@ -1033,6 +1115,7 @@
     repoTreeStatus.textContent = repoTree.truncated
       ? `⚠ ${repoTree.owner}/${repoTree.repo}@${repoTree.ref}: ツリーが大きすぎて切り詰められています（一部のみ）`
       : `${repoTree.owner}/${repoTree.repo}@${repoTree.ref}`;
+    addRepoHistory(sendRepoUrl.value);
     renderRepoFileList();
   }
 
@@ -1411,6 +1494,7 @@
         (msg) => { sendStatus.textContent = msg; },
         picked,
       );
+      addRepoHistory(sendRepoUrl.value);
       return { manifest, body };
     }
     throw new Error(`不明なモード: ${mode}`);
@@ -1878,6 +1962,8 @@
     for (const b of sendFileList.querySelectorAll('.send-file-remove')) b.disabled = disabled;
     sendRepoUrl.disabled = disabled;
     btnRepoLoad.disabled = disabled;
+    btnRepoHistoryClear.disabled = disabled;
+    for (const b of repoHistoryList.querySelectorAll('button')) b.disabled = disabled;
     repoFilter.disabled = disabled;
     btnRepoAll.disabled = disabled;
     btnRepoNone.disabled = disabled;
@@ -2952,6 +3038,7 @@
     lastUpdated.textContent = LAST_UPDATED;
     refreshSendFileInfo();
     refreshTextInfo();
+    renderRepoHistory();
     resetRecvState();
     if (!isSecureCameraContext()) httpsWarn.hidden = false;
   }

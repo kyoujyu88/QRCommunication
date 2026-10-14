@@ -632,6 +632,47 @@ code {
   white-space: pre-line;
 }
 
+.repo-history[hidden] { display: none; }
+.repo-history { margin: -6px 0 10px; }
+.repo-history-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+.repo-history-head .field-label { margin: 0; }
+.repo-history-list {
+  list-style: none;
+  margin: 0;
+  padding: 4px;
+  max-height: 168px;
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+.repo-history-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.repo-history-pick {
+  flex: 1 1 auto;
+  min-width: 0;
+  text-align: left;
+  background: none;
+  border: 0;
+  border-radius: 4px;
+  color: var(--fg);
+  font: inherit;
+  font-size: 0.85rem;
+  padding: 6px 8px;
+  cursor: pointer;
+  overflow-wrap: anywhere;
+}
+.repo-history-pick:hover:not(:disabled) { background: rgba(127, 127, 127, 0.12); }
+.repo-history-pick:disabled { opacity: 0.4; cursor: default; }
+
 .repo-picker-tools {
   gap: 6px;
   margin-bottom: 6px;
