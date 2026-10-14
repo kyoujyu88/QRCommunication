@@ -11,8 +11,9 @@
   const MISSING_QR_MULTI_TAG = 'QRTN'; // same, split across several cycling QRs
   const STORAGE_KEY = 'qrtt.settings.v1';
   // フッタに出す最終更新日。ビルド工程が無い（index.html を直接開ける）ので
-  // 自動埋め込みができない。内容を変更したらここも更新すること。
-  const LAST_UPDATED = '2026-10-06';
+  // 自動埋め込みができない。内容を変更したらここと、index.html の app.js /
+  // styles.css の ?v= も更新すること（ブラウザが古いファイルを使い続けないように）。
+  const LAST_UPDATED = '2026-10-14';
   const LARGE_TRANSFER_BYTES = 2 * 1024 * 1024; // 2 MB confirm threshold
 
   const DEFAULT_SETTINGS = {
@@ -2409,7 +2410,7 @@
       const done = (r) => { clearTimeout(timer); try { w.terminate(); } catch {} resolve(r); };
       const timer = setTimeout(() => done({ engine: null, engineError: '応答がありません（時間切れ）' }), 15000);
       try {
-        w = new Worker('scan-worker.js');
+        w = new Worker('scan-worker.js?v=' + LAST_UPDATED);
       } catch (err) {
         done({ engine: null, engineError: `Web Worker を起動できません（${err.message}）` });
         return;
@@ -2533,7 +2534,7 @@
       const n = Math.max(1, Math.min(3, (navigator.hardwareConcurrency || 2) - 1));
       try {
         for (let i = 0; i < n; i++) {
-          const w = new Worker('scan-worker.js');
+          const w = new Worker('scan-worker.js?v=' + LAST_UPDATED);
           const slot = { w, busy: false, dead: false, engine: null };
           w.onmessage = (ev) => {
             slot.busy = false;
