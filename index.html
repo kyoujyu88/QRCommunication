@@ -72,6 +72,14 @@
           <input id="sendRepoUrl" type="text" placeholder="https://github.com/kyoujyu88/QRCommunication" autocomplete="off" spellcheck="false">
           <small id="sendRepoParsed" class="hint">URL またはショート形式を貼り付けてください</small>
         </label>
+        <!-- 過去に使ったリポジトリの履歴（この端末のブラウザ内にだけ保存） -->
+        <div id="repoHistory" class="repo-history" hidden>
+          <div class="repo-history-head">
+            <span class="field-label">履歴（押すと入力されます）</span>
+            <button id="btnRepoHistoryClear" type="button" class="btn btn-sm">履歴をすべて削除</button>
+          </div>
+          <ul id="repoHistoryList" class="repo-history-list"></ul>
+        </div>
         <div class="row">
           <button id="btnRepoLoad" class="btn btn-sm">ファイル一覧を取得</button>
           <span id="repoTreeStatus" class="status">未取得（そのまま開始すると全ファイルを送ります）</span>
